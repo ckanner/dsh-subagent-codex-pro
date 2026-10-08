@@ -1,0 +1,24 @@
+# This plugin's bundle patch.
+#
+# One root row: the plugin itself. It registers a Codex subagent provider and,
+# per Agent, a `subagent_codex` tool that can carry a model and a reasoning
+# effort — into the Agent's own context, the way the LCU plugin registers `js`.
+#
+# `presets` names the committed Agent presets that get the tool. The official
+# `tool-subagent-codex` row is disabled in those presets, because two rows
+# registering the same tool name in one Agent's scope collide: the later
+# registration throws and that tool silently never appears.
+
+- insert:
+    - id: codex-pro
+      name: 'dsh-subagent-codex-pro'
+      config:
+        providerName: codex-pro
+        presets: [daily, heavy]
+        # `model` / `reasoningEffort` are deliberately unset. Whatever the user's
+        # prompt names is what the delegation uses; when it names nothing, the
+        # choice stays with Codex's own configuration (~/.codex/config.toml). A
+        # default here would silently override both.
+        #
+        # `modelSelection: false` hides `model` and `reasoning_effort` from the
+        # tool schema entirely.

@@ -1,0 +1,54 @@
+{
+  "name": "dsh-subagent-codex-pro",
+  "version": "0.1.0",
+  "description": "A Codex delegation tool for DeepSeek Harness that can carry a model and a reasoning effort per call.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"tests/*.spec.ts\"",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ckanner/dsh-subagent-codex-pro.git"
+  },
+  "homepage": "https://github.com/ckanner/dsh-subagent-codex-pro#readme",
+  "bugs": {
+    "url": "https://github.com/ckanner/dsh-subagent-codex-pro/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "codex",
+    "subagent"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
