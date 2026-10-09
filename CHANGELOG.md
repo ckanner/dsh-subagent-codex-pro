@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.1
+
+Documentation and packaging; no behaviour change.
+
+The published `files` list named only `lib` and the patch, so an installed copy shipped **no licence and no
+readme** — npm's own defaults covered neither once `files` was set. It now carries the licence, the readme, this
+changelog and the Chinese page.
+
+Joins a closing sentence that a blank line had split in two, and removes a `helper` entry from `files` that
+named a directory this package does not have.
+
 ## 0.1.0
 
 First release.
