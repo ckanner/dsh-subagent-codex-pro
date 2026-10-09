@@ -1,5 +1,7 @@
 # dsh-subagent-codex-pro
 
+English | [中文](docs/README.zh.md)
+
 A Codex delegation tool that can carry **a model and a reasoning effort per
 call** — the two things `@deepseek-ai/dsh-subagent-codex` cannot express.
 
@@ -160,7 +162,6 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 | continuable / thread reuse | ❌ one-shot, as the official provider is |
 | depth limit, persona, outputSchema, toolFilter | ❌ not implemented |
 
-The official provider remains the better choice where protocol fidelity matters —
-
-this exists because it cannot express these two choices, and should be retired
+The official provider remains the better choice where protocol fidelity matters.
+This exists because it cannot express these two choices, and should be retired
 once upstream can.
