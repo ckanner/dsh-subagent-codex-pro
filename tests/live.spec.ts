@@ -3,7 +3,7 @@
  *
  * Skipped unless `CODEX_SUBAGENT_LIVE=1`, so the default suite stays hermetic.
  * This is the case that proves the port: a real `codex app-server --stdio`
- * child, the initialize handshake, an ephemeral thread opened with a reasoning
+ * child, the initialize handshake, a thread opened with a reasoning
  * effort, one turn opened with an effort, and a final answer selected from the
  * notification stream.
  *

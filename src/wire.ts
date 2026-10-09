@@ -49,6 +49,16 @@ export type CodexPermissionMode = keyof typeof THREAD_PERMISSION_PARAMS
 /** The stop reasons one run can end with. */
 export type CodexStopReason = 'completed' | 'max-tokens' | 'error' | 'aborted'
 
+/**
+ * How long a thread lives.
+ *
+ * `ephemeral` is what this provider always did: the app-server's own notion of a
+ * throwaway thread, deleted when the connection ends, leaving nothing behind.
+ * `persistent` writes a rollout the Codex CLI can list and `thread/resume` can
+ * continue, which is also what puts it in front of the Codex desktop application.
+ */
+export type CodexThreadMode = 'ephemeral' | 'persistent'
+
 /** One text-only task submitted to a turn. */
 export type TaskText = string
 
@@ -232,6 +242,36 @@ export interface WireOutput {
 }
 
 /**
+ * What one wire needs beyond its transport.
+ *
+ * Bundled rather than positional: the caller's choice set grew past the point
+ * where six positional arguments stayed readable, and every one of them is a
+ * named decision the caller already holds.
+ */
+export interface CodexWireOptions {
+  /** Unattended permission policy for the thread. */
+  readonly permissionMode: CodexPermissionMode
+  /** Model for `thread/start`, when the caller chose one. */
+  readonly model?: string | undefined
+  /** Default thinking level for `thread/start`, when the caller chose one. */
+  readonly reasoningEffort?: string | undefined
+  /** How long the thread lives. Defaults to `ephemeral`. */
+  readonly threadMode?: CodexThreadMode | undefined
+  /**
+   * What the app-server records as the thread's originator.
+   *
+   * This is `initialize`'s `clientInfo.name`, and for a thread to appear in the
+   * Codex desktop application it must be exactly `Codex Desktop` — that client
+   * filters its list by this one value. The default here is therefore that
+   * literal, and overriding it trades desktop visibility for an honest name.
+   */
+  readonly originator?: string | undefined
+}
+
+/** The originator the Codex desktop client lists. */
+export const DEFAULT_ORIGINATOR = 'Codex Desktop'
+
+/**
  * One app-server connection and its single ephemeral thread/turn.
  *
  * Deliberately exposes no generic request surface: supporting another product
@@ -239,6 +279,8 @@ export interface WireOutput {
  */
 export class CodexAppServerWire {
   #permissionMode: CodexPermissionMode
+  #threadMode: CodexThreadMode
+  #originator: string
   #model: string | undefined
   /** Sent as `thread/start`'s `reasoningEffort`. Absent from the official adapter. */
   #reasoningEffort: string | undefined
@@ -266,13 +308,13 @@ export class CodexAppServerWire {
     input: WireInput,
     output: WireOutput,
     transport: LineTransport,
-    permissionMode: CodexPermissionMode,
-    model: string | undefined,
-    reasoningEffort: string | undefined,
+    options: CodexWireOptions,
   ) {
-    this.#permissionMode = permissionMode
-    this.#model = model
-    this.#reasoningEffort = reasoningEffort
+    this.#permissionMode = options.permissionMode
+    this.#model = options.model
+    this.#reasoningEffort = options.reasoningEffort
+    this.#threadMode = options.threadMode ?? 'ephemeral'
+    this.#originator = options.originator ?? DEFAULT_ORIGINATOR
     this.#transport = transport
     this.#fatal.promise.catch(() => {})
     this.#transport.setHooks({
@@ -327,7 +369,7 @@ export class CodexAppServerWire {
     object(
       await this.#guarded(
         this.#transport.request('initialize', {
-          clientInfo: { name: 'deepseek-harness', title: 'DeepSeek Harness', version: '0.0.1' },
+          clientInfo: { name: this.#originator, title: 'DeepSeek Harness', version: '0.0.1' },
           capabilities: { experimentalApi: false, requestAttestation: false },
         }, { signal }),
         signal,
@@ -339,7 +381,12 @@ export class CodexAppServerWire {
   }
 
   /**
-   * Create the run's private ephemeral thread and retain its identity.
+   * Create the run's thread and retain its identity.
+   *
+   * `ephemeral` follows this wire's thread mode. The app-server reports the
+   * decision back, and the check below is what proves it honoured the request:
+   * a `persistent` thread that came back ephemeral would be a silent downgrade,
+   * and the caller is about to promise the user a thread they can resume.
    *
    * @param cwd - the parent session's workspace.
    * @param signal - cancellation for an unpublished start.
@@ -349,7 +396,7 @@ export class CodexAppServerWire {
       object(
         await this.#guarded(this.#transport.request('thread/start', {
           cwd,
-          ephemeral: true,
+          ephemeral: this.#threadMode === 'ephemeral',
           ...this.#model === undefined ? {} : { model: this.#model },
           // ── this package's addition ────────────────────────────────────────
           // The model's default thinking level for the thread. The official
@@ -362,8 +409,79 @@ export class CodexAppServerWire {
       'thread/start thread',
     )
     const id = string(thread.id, 'thread/start thread id')
-    if (thread.ephemeral !== true) throw new Error(`${P}: app-server did not create an ephemeral thread`)
+    const ephemeral = thread.ephemeral === true
+    if (ephemeral !== (this.#threadMode === 'ephemeral')) {
+      throw new Error(`${P}: app-server created a ${ephemeral ? 'ephemeral' : 'persistent'} thread `
+        + `where ${this.#threadMode} was asked for`)
+    }
     this.#threadId = id
+    this.#progress(`thread ${id} (${this.#threadMode})`)
+  }
+
+  /**
+   * Continue an existing thread instead of creating one.
+   *
+   * The thread keeps the model and thinking level it was created with: both are
+   * `thread/start` parameters, so there is nothing to send here, and sending
+   * them would contradict the thread the user asked to continue. A per-turn
+   * effort still works through `runTurn`.
+   *
+   * The app-server refuses a thread with no rollout yet, so a thread becomes
+   * resumable only after it has carried one turn.
+   *
+   * @param threadId - the thread to continue, as a previous run reported it.
+   * @param signal - cancellation for an unpublished resume.
+   */
+  async resumeThread(threadId: string, signal?: AbortSignal): Promise<void> {
+    const response = object(
+      await this.#guarded(
+        this.#transport.request('thread/resume', { threadId }, { signal }),
+        signal,
+      ),
+      'thread/resume response',
+    )
+    // The reply carries the thread, but a thread already known by id is what the
+    // caller asked for; the response only has to prove the resume was accepted.
+    const resumed = response.thread
+    if (resumed !== undefined) {
+      const id = string(object(resumed, 'thread/resume thread').id, 'thread/resume thread id')
+      if (id !== threadId) throw new Error(`${P}: thread/resume answered for ${id}, not ${threadId}`)
+    }
+    this.#threadId = threadId
+    this.#progress(`thread ${threadId} (resumed)`)
+  }
+
+  /**
+   * Give the thread a name.
+   *
+   * The name is what a person sees in the Codex application's thread list. It
+   * matters here because a thread this provider creates has to report itself as
+   * `Codex Desktop` to be listed at all, so the name is the only place left to
+   * say that the work came from DSH and what it was. Best effort: a thread that
+   * ran is worth more than a naming failure, so the caller is told rather than
+   * thrown at.
+   *
+   * @param name - the name to record.
+   * @param signal - cancellation for an unpublished request.
+   * @returns whether the app-server accepted it.
+   */
+  async setThreadName(name: string, signal?: AbortSignal): Promise<boolean> {
+    if (this.#threadId === undefined) return false
+    try {
+      await this.#guarded(
+        this.#transport.request('thread/name/set', { threadId: this.#threadId, name }, { signal }),
+        signal,
+      )
+      this.#progress(`thread ${this.#threadId} named ${JSON.stringify(name)}`)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** The thread this wire is working in, once it has one. */
+  get threadId(): string | undefined {
+    return this.#threadId
   }
 
   /**

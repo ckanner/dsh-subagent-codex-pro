@@ -58,7 +58,7 @@ additions:
 
 ```js
 // thread/start
-{ cwd, ephemeral: true, ...(model ? { model } : {}), reasoningEffort, ...THREAD_PERMISSION_PARAMS[mode] }
+{ cwd, ephemeral, ...(model ? { model } : {}), reasoningEffort, ...THREAD_PERMISSION_PARAMS[mode] }
 // turn/start
 { threadId, input: [...], effort }
 ```
@@ -134,7 +134,47 @@ run done: text=8B
 
 A verified end-to-end run: 30 s wall clock, the model's `PROBE_OK` returned as
 the tool result. A real app-server run is also covered by the live test, which
-opens an ephemeral thread with `reasoningEffort` and a turn with `effort`.
+opens a thread with `reasoningEffort` and a turn with `effort`.
+
+## Thread lifetime
+
+Every delegation used to open an ephemeral thread — the app-server deletes it when the connection ends, so
+nothing was left to list or continue. `threadMode` chooses instead:
+
+```yaml
+- id: codex-pro
+  config:
+    threadMode: session       # ephemeral (default) | persistent | session
+```
+
+| | |
+|---|---|
+| `ephemeral` | A throwaway run. Nothing is written that the Codex CLI or the Codex application can list. |
+| `persistent` | Every delegation gets a durable thread: written to `~/.codex/sessions/`, listed by both, continuable. |
+| `session` | One durable thread per Agent session, so ten delegations leave one thread and every call after the first continues the same conversation. |
+
+A call overrides the choice with `thread_mode`, and continues a thread of its own with `thread_id`. A persistent
+result ends with the thread's id:
+
+```
+[codex thread 01a1212b-79cf-7241-8892-896094fad3d6 · persistent · pass it as thread_id to continue]
+```
+
+Resuming ignores `model` and `reasoning_effort`: both are `thread/start` parameters, and a resumed thread keeps
+the ones it was created with. The per-turn `effort` still applies.
+
+**Two things the app-server decides, both measured.** A thread with no turn yet is not resumable — it answers
+`no rollout found` — so a thread becomes continuable only after its first completed turn. And the Codex
+application lists a thread only when its originator is exactly `Codex Desktop`, the single value its client
+filters on; `originator` sets that and defaults to the literal. Overriding it trades application visibility for
+an honest name, and the Codex CLI lists the thread either way.
+
+Because the originator cannot say where a thread came from, a persistent one is named
+`DSH · <the call's description>` through `thread/name/set`, which is what a person sees in the list.
+
+**Why it is worth more than convenience.** A resumed thread keeps the same prompt prefix, so the endpoint's
+cache keeps hitting. Measured on the Codex side, 93–99% of input tokens came from cache; the same work driven
+through a plan-usage route measured 0%, because that route refuses every cache control.
 
 ## Background runs and progress
 
@@ -157,9 +197,9 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 | `model` / `reasoning_effort` per call | ✅ |
 | final message returned | ✅ |
 | `run_in_background` + progress via `job_output` | ✅ |
-| app-server protocol (handshake, ephemeral thread, approval decisions) | ✅ |
+| app-server protocol (handshake, thread lifecycle, approval decisions) | ✅ |
 | interactive approvals | by design none — a delegated run is unattended, as the official provider is |
-| continuable / thread reuse | ❌ one-shot, as the official provider is |
+| continuable / thread reuse | ✅ `session` reuses one; `thread_id` continues any |
 | depth limit, persona, outputSchema, toolFilter | ❌ not implemented |
 
 The official provider remains the better choice where protocol fidelity matters.

@@ -100,7 +100,37 @@ run: published 3f2a…
 run done: text=8B
 ```
 
-一次已验证的端到端运行：30 秒墙钟时间，模型的 `PROBE_OK` 作为工具结果返回。真实 app-server 运行也由 live 测试覆盖 —— 它开一个带 `reasoningEffort` 的临时 thread，以及一个带 `effort` 的 turn。
+一次已验证的端到端运行：30 秒墙钟时间，模型的 `PROBE_OK` 作为工具结果返回。真实 app-server 运行也由 live 测试覆盖 —— 它开一个带 `reasoningEffort` 的 thread，以及一个带 `effort` 的 turn。
+
+## 线程生命周期
+
+过去每次委派都开一个**临时 thread** —— app-server 在连接结束时把它删掉，所以**没有任何东西可以列出或续接**。`threadMode` 让你来选：
+
+```yaml
+- id: codex-pro
+  config:
+    threadMode: session       # ephemeral（默认）| persistent | session
+```
+
+| | |
+|---|---|
+| `ephemeral` | 一次性运行。不会留下任何 Codex CLI 或 Codex 应用能列出的东西。 |
+| `persistent` | 每次委派都得到一条持久 thread：写入 `~/.codex/sessions/`，两边都能列出，也能续接。 |
+| `session` | 每个 Agent 会话共用一条持久 thread —— 十次委派只留一条 thread，且第一次之后的每次调用都续接同一段对话。 |
+
+单次调用可以用 `thread_mode` 覆盖这个选择，也可以用 `thread_id` 续接它自己指定的那条 thread。持久模式的结果末尾会带上 thread id：
+
+```
+[codex thread 01a1212b-79cf-7241-8892-896094fad3d6 · persistent · pass it as thread_id to continue]
+```
+
+续接时会**忽略** `model` 和 `reasoning_effort`：二者都是 `thread/start` 的参数，而被续接的 thread 保留它创建时的取值。每轮的 `effort` 仍然有效。
+
+**有两件事由 app-server 决定，都是实测出来的。** 还没跑过 turn 的 thread **无法续接** —— 它会回 `no rollout found` —— 所以一条 thread 只有在完成第一次 turn 之后才可续接。另外，**Codex 应用只在 originator 恰好是 `Codex Desktop` 时才会列出该 thread**，那是它客户端过滤用的唯一取值；`originator` 就是设置它的，默认即该字面量。改成别的值就是用**应用内可见性**换一个**诚实的名字**，而 Codex CLI 两种情况都能列出。
+
+因为 originator 没法说明 thread 来自哪里，持久 thread 会通过 `thread/name/set` 命名为 `DSH · <本次调用的描述>` —— 这才是人在列表里看到的内容。
+
+**为什么它不只是"方便"。** 被续接的 thread 保持**同样的提示前缀**，于是端点的缓存持续命中。在 Codex 侧实测：**93–99% 的 input token 来自缓存**；同样的工作若走 plan-usage 路由实测为 **0%**，因为那条路由拒绝一切缓存控制。
 
 ## 后台运行与进度
 
@@ -120,9 +150,9 @@ tools.subagent_codex({ description: "…", prompt: "…", run_in_background: tru
 | 每次调用的 `model` / `reasoning_effort` | ✅ |
 | 返回最终消息 | ✅ |
 | `run_in_background` + 通过 `job_output` 看进度 | ✅ |
-| app-server 协议（握手、临时 thread、批准决定） | ✅ |
+| app-server 协议（握手、线程生命周期、批准决定） | ✅ |
 | 交互式批准 | 按设计没有 —— 委派运行是无人值守的，和官方 provider 一样 |
-| 可续接 / thread 复用 | ❌ 一次性，和官方 provider 一样 |
+| 可续接 / thread 复用 | ✅ `session` 复用一条；`thread_id` 可续接任意一条 |
 | 深度限制、persona、outputSchema、toolFilter | ❌ 未实现 |
 
 **在协议保真度重要的场合，官方 provider 仍是更好的选择。** 本包存在，是因为它表达不了上面那两个选择；上游能表达之后，本包就该退休。

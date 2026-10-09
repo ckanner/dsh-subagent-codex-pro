@@ -49,6 +49,7 @@ import type {
 } from './dsh-types.ts'
 import { settleJob } from './jobs.ts'
 import { delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
+import { DEFAULT_ORIGINATOR } from './wire.ts'
 import { createCodexTool } from './tool.ts'
 import type { CodexPermissionMode } from './wire.ts'
 
@@ -94,6 +95,32 @@ export interface Config {
   env?: Record<string, string>
   /** Agent preset ids whose sessions receive the delegation tool. */
   presets?: string[]
+  /**
+   * How long a delegated Codex thread lives.
+   *
+   * - `ephemeral` (the default) is a throwaway run: nothing is written that the
+   *   Codex CLI or the Codex application can list afterwards.
+   * - `persistent` gives every delegation its own durable thread, which the Codex
+   *   CLI and application list under the session's working directory and
+   *   `thread_id` can continue.
+   * - `session` reuses one durable thread for the whole Agent session, so a
+   *   session that delegates ten times leaves one thread rather than ten, and
+   *   after the first delegation each call continues the same conversation —
+   *   which keeps the prompt prefix stable and lets the model's cache do its
+   *   work. A call may still override either choice, and pass `thread_id` to
+   *   continue a thread of its own.
+   */
+  threadMode?: 'ephemeral' | 'persistent' | 'session'
+  /**
+   * What the app-server records as the thread's originator.
+   *
+   * This is what decides whether the Codex desktop application lists a thread:
+   * that client filters its list to the single value `Codex Desktop`, so the
+   * default here is that literal. Overriding it trades desktop visibility for an
+   * honest name — a thread the application will not show is still listed by the
+   * Codex CLI and still resumable.
+   */
+  originator?: string
 }
 
 /** The effort values Codex accepts; used only for diagnostics. */
@@ -198,11 +225,13 @@ class CodexExecProvider implements SubagentProviderLike {
  * @param config - provider name, defaults, and the presets to serve.
  */
 export function apply(ctx: Context, config: Config = {}): void {
-  const resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode' | 'modelSelection'>> & Config = {
+  const resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode' | 'modelSelection' | 'threadMode' | 'originator'>> & Config = {
     providerName: config.providerName ?? name,
     command: config.command ?? 'codex',
     permissionMode: config.permissionMode ?? DEFAULT_PERMISSION_MODE,
     modelSelection: config.modelSelection ?? true,
+    threadMode: config.threadMode ?? 'ephemeral',
+    originator: config.originator ?? DEFAULT_ORIGINATOR,
     ...(config.model === undefined ? {} : { model: config.model }),
     ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
     ...(config.env === undefined ? {} : { env: config.env }),
@@ -253,28 +282,95 @@ export function apply(ctx: Context, config: Config = {}): void {
     // works, it just runs in the foreground and says nothing about it.
     const jobs = ctx.get('jobs') as JobsServiceLike | undefined
 
+    /**
+     * The durable thread this Agent session is reusing, for `threadMode: session`.
+     *
+     * One Agent is one session, so this map is that session's memory of the
+     * thread it opened; it is deliberately per-Agent rather than global, because
+     * two sessions delegating at once must not continue each other's work.
+     */
+    const sessionThread = new Map<string, string>()
+
+    /** One call's resolved thread decision. */
+    interface CallLike {
+      /** The model's short description, used as the thread name's label. */
+      readonly label: string
+      readonly prompt: string
+      readonly model?: string
+      readonly reasoningEffort?: string
+      readonly threadMode?: 'ephemeral' | 'persistent'
+      readonly threadId?: string
+    }
+
     /** Run one call over the app-server protocol. */
     const runCall = async (
-      call: { readonly prompt: string, readonly model?: string, readonly reasoningEffort?: string },
+      call: CallLike,
       signal: AbortSignal,
       onProgress?: (text: string) => void,
-    ): Promise<string> => {
+    ): Promise<{ readonly text: string; readonly threadId: string | undefined }> => {
+      // An explicit thread id wins; then an explicit mode; then the session's
+      // remembered thread; then the configured default.
+      const configured = resolved.threadMode
+      const mode = call.threadMode ?? (configured === 'ephemeral' ? 'ephemeral' : 'persistent')
+      const remembered = sessionThread.get(String(agent.id))
+      const explicit = call.threadId
+      const reuse = explicit ?? (explicit === undefined && configured === 'session' && mode === 'persistent'
+        ? remembered
+        : undefined)
       diag(`run: model=${call.model ?? '<default>'} effort=${call.reasoningEffort ?? '<default>'} `
+        + `thread=${mode}${reuse === undefined ? '' : ` resume=${reuse}`} `
         + `cwd=${cwd} prompt=${String(call.prompt.length)}B via=app-server`)
-      const text = await delegateOnce({
-        prompt: call.prompt,
-        cwd,
-        command: resolved.command,
-        permissionMode: resolved.permissionMode,
-        model: call.model,
-        reasoningEffort: call.reasoningEffort,
-        env: resolved.env,
-        signal,
-        onStart: (id) => { diag(`run: published ${id}`) },
-        onProgress,
-      })
-      diag(`run done: text=${String(text.length)}B`)
-      return text
+      try {
+        const outcome = await delegateOnce({
+          prompt: call.prompt,
+          cwd,
+          command: resolved.command,
+          permissionMode: resolved.permissionMode,
+          model: call.model,
+          reasoningEffort: call.reasoningEffort,
+          threadMode: mode,
+          threadId: reuse,
+          originator: resolved.originator,
+          threadName: threadNameFor(call.label),
+          env: resolved.env,
+          signal,
+          onStart: (id) => { diag(`run: published ${id}`) },
+          onProgress,
+        })
+        if (mode === 'persistent' && outcome.threadId !== undefined) {
+          sessionThread.set(String(agent.id), outcome.threadId)
+        }
+        diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'}`)
+        return { text: withThreadMarker(outcome, mode), threadId: outcome.threadId }
+      } catch (error: unknown) {
+        // A session's remembered thread can be gone — the user removed it, or the
+        // Codex state moved. That is this plugin's own bookkeeping, so a fresh
+        // thread is the right repair; an id the caller passed explicitly is not
+        // repaired silently, because continuing it was the whole request.
+        if (reuse !== undefined && explicit === undefined && mode === 'persistent') {
+          diag(`run: remembered thread ${reuse} could not be resumed (${String(error)}) - starting a new one`)
+          sessionThread.delete(String(agent.id))
+          const outcome = await delegateOnce({
+            prompt: call.prompt,
+            cwd,
+            command: resolved.command,
+            permissionMode: resolved.permissionMode,
+            model: call.model,
+            reasoningEffort: call.reasoningEffort,
+            threadMode: mode,
+            originator: resolved.originator,
+            threadName: threadNameFor(call.label),
+            env: resolved.env,
+            signal,
+            onStart: (id) => { diag(`run: published ${id}`) },
+            onProgress,
+          })
+          if (outcome.threadId !== undefined) sessionThread.set(String(agent.id), outcome.threadId)
+          diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'}`)
+          return { text: withThreadMarker(outcome, mode), threadId: outcome.threadId }
+        }
+        throw error
+      }
     }
 
     try {
@@ -282,6 +378,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         cwd,
         modelSelectionEnabled: selection,
         backgroundEnabled: jobs !== undefined,
+        defaultThreadMode: resolved.threadMode,
+        threadControlEnabled: true,
         ...(resolved.model === undefined ? {} : { model: resolved.model }),
         ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),
         run: (call) => runCall(call, call.signal),
@@ -338,4 +436,40 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     serve(agent)
   })
+}
+
+/**
+ * Append the thread marker to a completed delegation's text.
+ *
+ * The id is carried in the text rather than in a richer tool result so that the
+ * answer stays the plain final message the model already reads, while the one
+ * fact a follow-up call needs is still in front of it. Appending here rather
+ * than in the tool means a background job's collected result carries it too.
+ *
+ * @param outcome - the finished run.
+ * @param mode - the thread mode the run used.
+ * @returns the text to report.
+ */
+function withThreadMarker(
+  outcome: { readonly text: string; readonly threadId: string | undefined },
+  mode: 'ephemeral' | 'persistent',
+): string {
+  if (mode === 'ephemeral' || outcome.threadId === undefined) return outcome.text
+  return `${outcome.text}\n\n[codex thread ${outcome.threadId} · persistent · pass it as thread_id to continue]`
+}
+
+/**
+ * The name a persistent thread carries in the Codex application.
+ *
+ * A thread from this provider has to report itself as `Codex Desktop` to be
+ * listed there at all, so the name is the only place that can say the work came
+ * from DSH and what it was. The model's own short description is the best label
+ * available, and the prefix keeps them together in a list sorted by recency.
+ *
+ * @param label - the call's short description.
+ * @returns the name to record.
+ */
+function threadNameFor(label: string): string {
+  const trimmed = label.trim()
+  return trimmed === '' ? 'DSH · Codex delegation' : `DSH · ${trimmed}`
 }

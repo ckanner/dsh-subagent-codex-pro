@@ -17,7 +17,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { LineTransport, type JsonRpcMessage } from './jsonrpc.ts'
-import { CodexAppServerWire, type CodexPermissionMode, type CodexStopReason } from './wire.ts'
+import { CodexAppServerWire, DEFAULT_ORIGINATOR, type CodexPermissionMode, type CodexStopReason } from './wire.ts'
+import type { CodexThreadMode } from './wire.ts'
 
 /** Default grace between termination tiers. */
 const DEFAULT_DISPOSE_GRACE_MS = 3_000
@@ -39,6 +40,24 @@ export interface CodexRunSpec {
   readonly reasoningEffort?: string | undefined
   /** Per-turn thinking level for `turn/start`, when the caller chose one. */
   readonly effort?: string | undefined
+  /** How long the thread lives. Defaults to `ephemeral`. */
+  readonly threadMode?: CodexThreadMode | undefined
+  /**
+   * Continue this thread instead of creating one.
+   *
+   * A thread is resumable only once it has carried a turn, so the caller owns
+   * remembering an id it was given earlier.
+   */
+  readonly resumeThreadId?: string | undefined
+  /** What the app-server records as the thread's originator. */
+  readonly originator?: string | undefined
+  /**
+   * A name for a persistent thread, shown in the Codex application's thread list.
+   *
+   * Ignored for `ephemeral`: a thread that leaves nothing behind has no list to
+   * appear in.
+   */
+  readonly threadName?: string | undefined
   /** Extra environment entries. */
   readonly env?: Readonly<Record<string, string>> | undefined
   /** Grace between termination tiers. */
@@ -52,6 +71,14 @@ export interface CodexRunOutcome {
   readonly output: readonly { readonly type: 'text'; readonly text: string }[]
   readonly stopReason: CodexStopReason
   readonly diagnostic?: string
+  /**
+   * The thread this run used.
+   *
+   * Reported for every outcome, including a failed one: a persistent thread that
+   * half-ran is still a thread the user may want to open or clean up, and it is
+   * the only handle `resumeThreadId` accepts.
+   */
+  readonly threadId?: string | undefined
 }
 
 /** The published run. */
@@ -207,9 +234,13 @@ export async function startCodexRun(
     child.proc.stdout,
     child.proc.stdin,
     transport,
-    spec.permissionMode,
-    spec.model,
-    spec.reasoningEffort,
+    {
+      permissionMode: spec.permissionMode,
+      model: spec.model,
+      reasoningEffort: spec.reasoningEffort,
+      threadMode: spec.threadMode,
+      originator: spec.originator ?? DEFAULT_ORIGINATOR,
+    },
   )
   if (spec.onProgress !== undefined) wire.setProgressReporter(spec.onProgress)
   const forwardStderr = (chunk: Buffer | string): void => {
@@ -257,8 +288,19 @@ export async function startCodexRun(
   let startupStage = 'initialize'
   try {
     await Promise.race([wire.initialize(signal), processFailure])
-    startupStage = 'thread-start'
-    await Promise.race([wire.startThread(spec.cwd, signal), processFailure])
+    startupStage = spec.resumeThreadId === undefined ? 'thread-start' : 'thread-resume'
+    await Promise.race([
+      spec.resumeThreadId === undefined
+        ? wire.startThread(spec.cwd, signal)
+        : wire.resumeThread(spec.resumeThreadId, signal),
+      processFailure,
+    ])
+    // A persistent thread is named so the Codex application's list says where it
+    // came from; the id alone cannot, because the originator has to be the value
+    // that client filters on.
+    if (spec.threadMode === 'persistent' && spec.threadName !== undefined) {
+      await wire.setThreadName(spec.threadName, signal)
+    }
   } catch (error: unknown) {
     signal.removeEventListener('abort', onAbort)
     const cancelledBeforeCleanup = runAbort.signal.aborted
@@ -283,7 +325,7 @@ export async function startCodexRun(
     try {
       const terminal = await Promise.race([wire.runTurn(texts, runAbort.signal, spec.effort), processFailure])
       if (terminal.stopReason === 'completed') {
-        return { output: terminal.output, stopReason: terminal.stopReason }
+        return { output: terminal.output, stopReason: terminal.stopReason, threadId: wire.threadId }
       }
       await new Promise((resolve) => { setImmediate(resolve) })
       const facts = withProcessOutcome(wire.collectFailure())
@@ -293,6 +335,7 @@ export async function startCodexRun(
         output: terminal.output,
         stopReason: terminal.stopReason,
         diagnostic: permission === undefined ? failure : `${failure}\n${permission}`,
+        threadId: wire.threadId,
       }
     } catch (error: unknown) {
       await new Promise((resolve) => { setImmediate(resolve) })
@@ -303,6 +346,7 @@ export async function startCodexRun(
         output: [],
         stopReason: runAbort.signal.aborted ? 'aborted' : 'error',
         diagnostic: permission === undefined ? failure : `${failure}\n${permission}`,
+        threadId: wire.threadId,
       }
     }
   }
@@ -331,6 +375,24 @@ export type { JsonRpcMessage }
  * @returns the child's final message.
  * @throws when the run does not complete; the diagnostic is the message.
  */
+/**
+ * A delegation that did not complete.
+ *
+ * Carries the thread it used: a persistent thread that failed is still a thread
+ * the user may want to open or remove, and the message is the only thing most
+ * callers look at.
+ */
+export class CodexDelegationFailure extends Error {
+  /** The thread the failed run used, when the app-server had got that far. */
+  readonly threadId: string | undefined
+
+  constructor(message: string, threadId: string | undefined) {
+    super(message)
+    this.name = 'CodexDelegationFailure'
+    this.threadId = threadId
+  }
+}
+
 export async function delegateOnce(options: {
   readonly prompt: string
   readonly cwd: string
@@ -338,13 +400,21 @@ export async function delegateOnce(options: {
   readonly permissionMode: CodexPermissionMode
   readonly model?: string | undefined
   readonly reasoningEffort?: string | undefined
+  /** How long the thread lives. Defaults to `ephemeral`. */
+  readonly threadMode?: CodexThreadMode | undefined
+  /** Continue this thread instead of creating one. */
+  readonly threadId?: string | undefined
+  /** What the app-server records as the thread's originator. */
+  readonly originator?: string | undefined
+  /** A name for a persistent thread, shown in the Codex application. */
+  readonly threadName?: string | undefined
   readonly env?: Readonly<Record<string, string>> | undefined
   readonly signal: AbortSignal
   /** Called once the run is published, for diagnostics. */
   readonly onStart?: (id: string) => void
   /** Narrates notable child activity. */
   readonly onProgress?: ((text: string) => void) | undefined
-}): Promise<string> {
+}): Promise<{ readonly text: string; readonly threadId: string | undefined }> {
   const run = await startCodexRun(
     [{ type: 'text', text: options.prompt }],
     {
@@ -355,7 +425,11 @@ export async function delegateOnce(options: {
       reasoningEffort: options.reasoningEffort,
       // The same choice reaches both fields: the thread default and this turn.
       effort: options.reasoningEffort,
-      env: options.env,
+
+        threadMode: options.threadMode,
+        resumeThreadId: options.threadId,
+        originator: options.originator,
+        threadName: options.threadName,      env: options.env,
       onProgress: options.onProgress,
     },
     options.signal,
@@ -364,8 +438,15 @@ export async function delegateOnce(options: {
   try {
     const outcome = await run.result
     const text = outcome.output.map((block) => block.text).join('\n\n')
-    if (outcome.stopReason === 'completed' && text !== '') return text
-    throw new Error(outcome.diagnostic ?? `codex-pro: the run ended as ${outcome.stopReason}`)
+      if (outcome.stopReason === 'completed' && text !== '') {
+        return { text, threadId: outcome.threadId }
+      }
+    // A failure still reports its thread: a persistent thread that half-ran is
+    // still one the user may want to open or clean up.
+    throw new CodexDelegationFailure(
+      outcome.diagnostic ?? `codex-pro: the run ended as ${outcome.stopReason}`,
+      outcome.threadId,
+    )
   } finally {
     await run.teardown()
   }

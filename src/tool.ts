@@ -25,6 +25,10 @@ export interface CodexCall {
   readonly prompt: string
   readonly model?: string
   readonly reasoningEffort?: string
+  /** How long this delegation's thread lives, when the call chose. */
+  readonly threadMode?: 'ephemeral' | 'persistent'
+  /** Continue this thread instead of creating one. */
+  readonly threadId?: string
 }
 
 /** Everything the tool needs that does not change per call. */
@@ -45,8 +49,13 @@ export interface CodexToolOptions {
   readonly modelSelectionEnabled: boolean
   /** Whether the jobs service is present, which is what makes background runs possible. */
   readonly backgroundEnabled: boolean
-  /** Run one delegation and return its final text. */
-  readonly run: (request: CodexCall & { readonly signal: AbortSignal }) => Promise<string>
+  /** The plugin's configured thread mode, named in the tool description. */
+  readonly defaultThreadMode: 'ephemeral' | 'persistent' | 'session'
+  /** Whether a call may override the thread mode and resume a thread. */
+  readonly threadControlEnabled: boolean
+  /** Run one delegation and return its final text and the thread it used. */
+  readonly run: (request: CodexCall & { readonly signal: AbortSignal }) =>
+    Promise<{ readonly text: string; readonly threadId: string | undefined }>
   /**
    * Start one delegation as a background job.
    *
@@ -81,6 +90,15 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
       + (options.backgroundEnabled
         ? ' A delegation typically takes a minute or more: set `run_in_background` unless your next action'
           + ' depends on the result.'
+        : '')
+      + (options.threadControlEnabled
+        ? ' A delegation runs in a Codex thread whose lifetime is `'
+          + options.defaultThreadMode
+          + '` by default. Set `thread_mode: "persistent"` when the user wants to see, reopen, or continue this'
+          + ' work in Codex itself — such a thread appears in the Codex application under this workspace and'
+          + ' its id is reported with the result. Set `thread_mode: "ephemeral"` for a run that must leave no'
+          + ' trace. Pass `thread_id` to continue an earlier thread instead of starting one; that thread keeps'
+          + ' its original model and thinking level, so `model` and `reasoning_effort` are ignored then.'
         : ''),
     // A whole JSON Schema object: the harness rejects anything that is not
     // `type: "object"`.
@@ -116,6 +134,25 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
                 type: 'boolean',
                 description: 'Run as a background job and return its id (collect with `job_output`, stop with'
                   + ' `job_kill`). Defaults to false; set it unless your next action depends on the result.',
+              },
+            }
+          : {},
+        ...options.threadControlEnabled
+          ? {
+              thread_mode: {
+                type: 'string',
+                enum: ['ephemeral', 'persistent'],
+                description: 'Lifetime of this delegation\'s Codex thread. `persistent` keeps the thread after'
+                  + ' the run: it appears in the Codex application under this workspace and can be continued'
+                  + ' later by passing its id as `thread_id`. It also keeps the prompt prefix stable, so later'
+                  + ' resumes read from the model\'s cache. `ephemeral` is a throwaway run that leaves nothing'
+                  + ' behind. Omit to use the configured default.',
+              },
+              thread_id: {
+                type: 'string',
+                description: 'Continue an existing Codex thread instead of creating one. Pass the id a previous'
+                  + ' delegation reported. The thread keeps its original model and thinking level, so `model`'
+                  + ' and `reasoning_effort` are ignored for this call.',
               },
             }
           : {},
@@ -161,16 +198,27 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
       const label = typeof request.description === 'string' && request.description !== ''
         ? request.description
         : 'Codex delegation'
+      const threadMode = request.thread_mode === 'ephemeral' || request.thread_mode === 'persistent'
+        ? request.thread_mode
+        : undefined
+      const threadId = typeof request.thread_id === 'string' && request.thread_id !== ''
+        ? request.thread_id
+        : undefined
       const call: CodexCall = {
         label,
         prompt,
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
+        ...(threadMode === undefined ? {} : { threadMode }),
+        ...(threadId === undefined ? {} : { threadId }),
       }
       if (options.backgroundEnabled && request.run_in_background === true) {
         return { kind: 'background' as const, jobId: options.startBackground(call) }
       }
-      return options.run({ ...call, signal: exec.signal })
+      // The runner owns how a thread id reaches the model: it appends the marker
+      // to the text, so a background job's collected result carries the id too.
+      const { text } = await options.run({ ...call, signal: exec.signal })
+      return text
     },
   }
 }

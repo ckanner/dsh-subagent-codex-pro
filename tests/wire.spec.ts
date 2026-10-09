@@ -34,6 +34,14 @@ class FakeStream extends EventEmitter {
 }
 
 /** A scripted app-server peer. */
+/**
+ * A responder returns this to answer with a JSON-RPC error rather than a result.
+ *
+ * Without it the double can only ever reply successfully, which leaves every
+ * failure branch untestable.
+ */
+const FAIL = Symbol('scripted JSON-RPC failure')
+
 class Peer {
   readonly toPeer = new FakeStream()
   readonly fromPeer = new FakeStream()
@@ -59,6 +67,10 @@ class Peer {
       this.received.push({ method: message.method, params: message.params })
       const result = this.#respond(message.method, message.params, this)
       if (result === undefined) continue
+      if (result === FAIL) {
+        this.fromPeer.feed(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'scripted failure' } })}\n`)
+        continue
+      }
       this.fromPeer.feed(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`)
     }
   }
@@ -81,6 +93,8 @@ function harness(options: {
   permissionMode?: CodexPermissionMode
   model?: string
   reasoningEffort?: string
+  threadMode?: 'ephemeral' | 'persistent'
+  originator?: string
   respond?: (method: string, params: unknown, peer: Peer) => unknown | undefined
 } = {}): { wire: CodexAppServerWire; peer: Peer } {
   const peer = new Peer(options.respond ?? (() => undefined))
@@ -92,9 +106,13 @@ function harness(options: {
     peer.fromPeer,
     peer.toPeer,
     transport,
-    options.permissionMode ?? 'never',
-    options.model,
-    options.reasoningEffort,
+    {
+      permissionMode: options.permissionMode ?? 'never',
+      model: options.model,
+      reasoningEffort: options.reasoningEffort,
+      threadMode: options.threadMode,
+      originator: options.originator,
+    },
   )
   return { wire, peer }
 }
@@ -292,7 +310,10 @@ test('a non-ephemeral thread is rejected', async () => {
   })
   await wire.initialize()
   peer.pump()
-  await assert.rejects(async () => wire.startThread('/work'), /did not create an ephemeral thread/)
+  await assert.rejects(
+    async () => wire.startThread('/work'),
+    /created a persistent thread where ephemeral was asked for/,
+  )
 })
 
 test('the wire narrates child activity, and a broken reporter cannot stop the run', async () => {
@@ -329,9 +350,144 @@ test('the wire narrates child activity, and a broken reporter cannot stop the ru
   peer.pump()
   const result = await running
   assert.deepEqual(result.output, [{ type: 'text', text: 'DONE' }])
-  // The command item was the throwing call; the commentary and final answer followed.
-  assert.deepEqual(lines, ['thinking about it'])
-  // Two narrated events: the command item (whose report threw) and the commentary.
-  // The final answer is the result, not progress.
-  assert.equal(calls, 2)
+  // The thread line startThread now reports is the throwing call; the command
+  // item, whose report succeeded, and the commentary follow it.
+  assert.deepEqual(lines, ['commandExecution completed: ls -la', 'thinking about it'])
+  // Three narrated events: the thread, the command item, and the commentary. The
+  // final answer is the result, not progress.
+  assert.equal(calls, 3)
+})
+
+test('persistent mode asks for a durable thread and reports its id', async () => {
+  const { wire, peer } = harness({
+    threadMode: 'persistent',
+    respond: (method) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return { thread: { id: 'thread-9', ephemeral: false } }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.startThread('/work')
+  assert.equal(peer.paramsOf('thread/start').ephemeral, false)
+  assert.equal(wire.threadId, 'thread-9')
+})
+
+test('persistent mode is rejected when the app-server downgrades it', async () => {
+  const { wire, peer } = harness({
+    threadMode: 'persistent',
+    respond: (method) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await assert.rejects(
+    async () => wire.startThread('/work'),
+    /created a ephemeral thread where persistent was asked for/,
+  )
+})
+
+test('resumeThread continues a thread without restating model or effort', async () => {
+  const { wire, peer } = harness({
+    model: 'gpt-6-astra',
+    reasoningEffort: 'xhigh',
+    respond: (method) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/resume') return { thread: { id: 'thread-7', ephemeral: false } }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.resumeThread('thread-7')
+  const params = peer.paramsOf('thread/resume')
+  assert.equal(params.threadId, 'thread-7')
+  // Both are thread/start parameters: a resumed thread keeps the ones it was made with.
+  assert.equal(params.model, undefined)
+  assert.equal(params.reasoningEffort, undefined)
+  assert.equal(wire.threadId, 'thread-7')
+})
+
+test('resumeThread refuses a reply about another thread', async () => {
+  const { wire, peer } = harness({
+    respond: (method) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/resume') return { thread: { id: 'someone-else' } }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await assert.rejects(async () => wire.resumeThread('thread-7'), /answered for someone-else, not thread-7/)
+})
+
+test('the originator reaches initialize, and defaults to Codex Desktop', async () => {
+  const named = harness({ originator: 'dsh-plugin-lcu', respond: (m) => (m === 'initialize' ? {} : undefined) })
+  await named.wire.initialize()
+  named.peer.pump()
+  assert.equal((named.peer.paramsOf('initialize').clientInfo as { name: string }).name, 'dsh-plugin-lcu')
+
+  const byDefault = harness({ respond: (m) => (m === 'initialize' ? {} : undefined) })
+  await byDefault.wire.initialize()
+  byDefault.peer.pump()
+  assert.equal((byDefault.peer.paramsOf('initialize').clientInfo as { name: string }).name, 'Codex Desktop')
+})
+
+test('a persistent thread can be named, and naming never fails the run', async () => {
+  const { wire, peer } = harness({
+    threadMode: 'persistent',
+    respond: (method) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return { thread: { id: 'thread-5', ephemeral: false } }
+      if (method === 'thread/name/set') return {}
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.startThread('/work')
+
+  // Before a thread exists there is nothing to name.
+  const empty = harness({ respond: (m) => (m === 'initialize' ? {} : undefined) })
+  await empty.wire.initialize()
+  empty.peer.pump()
+  assert.equal(await empty.wire.setThreadName('too early'), false)
+
+  assert.equal(await wire.setThreadName('DSH · probe'), true)
+  const params = peer.paramsOf('thread/name/set')
+  assert.equal(params.threadId, 'thread-5')
+  assert.equal(params.name, 'DSH · probe')
+})
+
+test('naming failure is reported, not thrown', async () => {
+  const { wire, peer } = harness({
+    threadMode: 'persistent',
+    respond: (method) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return { thread: { id: 'thread-6', ephemeral: false } }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.startThread('/work')
+  // The peer answers thread/name/set with a JSON-RPC error, which the wire
+  // reports as a false rather than letting it fail the run.
+  const failing = harness({
+    threadMode: 'persistent',
+    respond: (method) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return { thread: { id: 'thread-7', ephemeral: false } }
+      if (method === 'thread/name/set') return FAIL
+      return undefined
+    },
+  })
+  await failing.wire.initialize()
+  failing.peer.pump()
+  await failing.wire.startThread('/work')
+  assert.equal(await failing.wire.setThreadName('anything'), false)
 })

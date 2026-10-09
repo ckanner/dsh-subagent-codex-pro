@@ -122,7 +122,7 @@ test('the tool forwards the call\'s model and effort to the runner', async () =>
     modelSelectionEnabled: true,
     run: async (request) => {
       seen.push(request)
-      return 'DONE'
+      return { text: 'DONE', threadId: undefined }
     },
   })
   const result = await tool.execute(
@@ -149,7 +149,7 @@ test('run_in_background appears only when the jobs service is present', async ()
   const base = {
     cwd: '/w',
     modelSelectionEnabled: true,
-    run: async () => 'foreground',
+    run: async () => ({ text: 'foreground', threadId: undefined }),
     startBackground: () => 'job-1',
   }
   const props = (tool: { parameters: Record<string, unknown> }): string[] =>
@@ -176,7 +176,7 @@ test('a background call returns its job id and never calls the foreground runner
     modelSelectionEnabled: true,
     backgroundEnabled: true,
     model: 'gpt-6.1-sol',
-    run: async (request) => { ran.push(request.prompt); return 'foreground' },
+    run: async (request) => { ran.push(request.prompt); return { text: 'foreground', threadId: undefined } },
     startBackground: (request) => {
       started.push({ label: request.label, prompt: request.prompt, model: request.model, reasoningEffort: request.reasoningEffort })
       return 'job-42'
@@ -205,11 +205,64 @@ test('a background call returns its job id and never calls the foreground runner
 test('a background delegation settles with a job outcome, never a bare value', async () => {
   const { settleJob } = await import('../src/jobs.ts')
   // Success: the delegation's text becomes `result`, which the model reads back.
-  assert.deepEqual(await settleJob(Promise.resolve('PROBE_OK')), { status: 'completed', result: 'PROBE_OK' })
+  assert.deepEqual(await settleJob(Promise.resolve({ text: 'PROBE_OK', threadId: undefined })), { status: 'completed', result: 'PROBE_OK' })
   // Failure must still settle, because `done` is not allowed to reject.
   const failed = await settleJob(Promise.reject(new Error('codex exited 3')))
   assert.equal(failed.status, 'failed')
   assert.match(failed.detail ?? '', /codex exited 3/)
   // The record is lossless JSON, which is what the registry validates.
-  assert.equal(JSON.stringify(await settleJob(Promise.resolve('x'))), '{"status":"completed","result":"x"}')
+  assert.equal(JSON.stringify(await settleJob(Promise.resolve({ text: 'x', threadId: undefined }))), '{"status":"completed","result":"x"}')
+})
+
+test('the tool declares and forwards the thread controls when enabled', async () => {
+  const { createCodexTool } = await import('../src/tool.ts')
+  const seen: { threadMode?: string; threadId?: string }[] = []
+  const make = (threadControlEnabled: boolean) => createCodexTool({
+    cwd: '/w',
+    modelSelectionEnabled: true,
+    backgroundEnabled: false,
+    defaultThreadMode: 'session',
+    threadControlEnabled,
+    run: async (request) => {
+      seen.push({ threadMode: request.threadMode, threadId: request.threadId })
+      return { text: 'DONE', threadId: 'thread-3' }
+    },
+  })
+  const props = (tool: { parameters: Record<string, unknown> }): string[] =>
+    Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
+
+  // disabled: the schema is exactly what it was before this feature existed
+  assert.deepEqual(props(make(false)), ['description', 'prompt', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(make(true)), ['description', 'prompt', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
+
+  const tool = make(true)
+  await tool.execute(
+    { description: 'probe', prompt: 'go', thread_mode: 'persistent', thread_id: 'thread-1' },
+    { signal: new AbortController().signal },
+  )
+  assert.deepEqual(seen, [{ threadMode: 'persistent', threadId: 'thread-1' }])
+
+  // An unknown mode is not forwarded as a mode; the runner falls back to config.
+  seen.length = 0
+  await tool.execute(
+    { description: 'probe', prompt: 'go', thread_mode: 'nonsense' },
+    { signal: new AbortController().signal },
+  )
+  assert.deepEqual(seen, [{ threadMode: undefined, threadId: undefined }])
+})
+
+test('the tool describes the thread default it was configured with', async () => {
+  const { createCodexTool } = await import('../src/tool.ts')
+  const described = (defaultThreadMode: 'ephemeral' | 'persistent' | 'session') => createCodexTool({
+    cwd: '/w',
+    modelSelectionEnabled: false,
+    backgroundEnabled: false,
+    defaultThreadMode,
+    threadControlEnabled: true,
+    run: async () => ({ text: 'x', threadId: undefined }),
+  }).description as string
+
+  assert.match(described('session'), /`session` by default/)
+  assert.match(described('persistent'), /`persistent` by default/)
+  assert.match(described('session'), /thread_id/)
 })

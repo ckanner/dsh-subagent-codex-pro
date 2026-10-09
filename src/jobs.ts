@@ -25,13 +25,16 @@ export interface JobOutcomeLike {
  * Never rejects: the contract requires a settlement record even when the work
  * failed, so a rejection becomes `status: 'failed'` with the reason in `detail`.
  *
- * @param delegation - the running delegation's promise.
+ * @param delegation - the running delegation's promise, already carrying the
+ * thread marker the runner appended.
  * @returns the outcome record the jobs registry accepts.
  */
-export async function settleJob(delegation: Promise<string>): Promise<JobOutcomeLike> {
+export async function settleJob(
+  delegation: Promise<{ readonly text: string; readonly threadId: string | undefined }>,
+): Promise<JobOutcomeLike> {
   try {
-    const result = await delegation
-    return { status: 'completed', result }
+    const { text } = await delegation
+    return { status: 'completed', result: text }
   } catch (error: unknown) {
     return {
       status: 'failed',
