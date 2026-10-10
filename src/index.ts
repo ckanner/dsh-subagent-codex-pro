@@ -128,6 +128,29 @@ interface AttachmentStoreLike {
   saveImages(images: readonly { readonly data: Buffer; readonly mediaType: string }[]): Promise<readonly unknown[]>
 }
 
+/**
+ * Whether a model route's declared modalities refuse images.
+ *
+ * This is the harness's own rule, and matching it exactly is the point: an image
+ * is refused only when the route **declares** input modalities and `image` is not
+ * among them. An undeclared route is left to the harness, which rejects an
+ * attachment for a model that cannot read it anyway.
+ *
+ * Being stricter cost a real screenshot. The default `deepseek-flash` entry
+ * declares `['text', 'image']`, and an earlier guard here failed closed whenever
+ * the route could not be resolved — which turned every image into a text note in
+ * a session that could have displayed it.
+ *
+ * @param info - the resolved model route, when it could be resolved.
+ * @returns whether the route says it cannot take images.
+ */
+export function routeRefusesImages(
+  info: { readonly inputModalities?: readonly string[] } | undefined,
+): boolean {
+  const declared = info?.inputModalities
+  return declared !== undefined && !declared.includes('image')
+}
+
 /** The slice of the harness's LLM service this plugin needs. */
 interface LlmServiceLike {
   resolveModelInfo(
@@ -217,9 +240,19 @@ class CodexExecProvider implements SubagentProviderLike {
     persona: false,
   } as const
 
+  /**
+   * The resolved configuration.
+   *
+   * A plain field rather than a constructor parameter property: Node's
+   * type-stripping mode rejects that syntax outright, which made this module
+   * unimportable from a test and left its pure helpers untestable.
+   */
+  readonly resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode'>> & Config
+
   constructor(
-    private readonly resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode'>> & Config,
+    resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode'>> & Config,
   ) {
+    this.resolved = resolved
     this.name = resolved.providerName
   }
 
@@ -328,17 +361,32 @@ export function apply(ctx: Context, config: Config = {}): void {
     // works, it just runs in the foreground and says nothing about it.
     const jobs = ctx.get('jobs') as JobsServiceLike | undefined
 
-    /** Whether the calling Agent's model route admits images at all. */
-    const modelTakesImages = async (): Promise<boolean> => {
+    /**
+     * Whether the calling Agent's model route refuses images.
+     *
+     * The rule is the harness's own, deliberately: an image is refused only when
+     * the route **declares** input modalities and `image` is not among them. An
+     * undeclared route is left to the harness, which is where an attachment for a
+     * model that cannot read it is rejected anyway.
+     *
+     * Being stricter here was a real mistake: the default `deepseek-flash` entry
+     * declares `['text', 'image']`, and a guard that failed closed on an
+     * unresolvable route silently turned every screenshot into a text note. So an
+     * unresolvable route now delivers the image and lets the harness decide.
+     *
+     * @returns whether this plugin should withhold images.
+     */
+    const shouldWithholdImages = async (): Promise<boolean> => {
       const llm = ctx.get('llm') as LlmServiceLike | undefined
-      const routed = (agent.session as { requestHeader?(): { config?: { provider?: string, model?: string } } })
-        .requestHeader?.()?.config
-      const provider = routed?.provider
-      const model = routed?.model
+      const header = (agent.session as {
+        requestHeader?(): { config?: { provider?: string, model?: string } }
+      }).requestHeader?.()
+      const options = (agent as unknown as { options?: { provider?: string, model?: string } }).options
+      const provider = header?.config?.provider ?? options?.provider
+      const model = header?.config?.model ?? options?.model
       if (llm === undefined || provider === undefined || model === undefined) return false
       try {
-        const info = await llm.resolveModelInfo(provider, model)
-        return info.inputModalities !== undefined && info.inputModalities.includes('image')
+        return routeRefusesImages(await llm.resolveModelInfo(provider, model))
       } catch {
         return false
       }
@@ -379,8 +427,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         for (let i = 0; i < images.length; i += 1) notesFor('no attachment store is mounted')
         return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
       }
-      if (!await modelTakesImages()) {
-        for (let i = 0; i < images.length; i += 1) notesFor('this model route does not accept images')
+      if (await shouldWithholdImages()) {
+        for (let i = 0; i < images.length; i += 1) notesFor('this model route declares no image input')
         return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
       }
 

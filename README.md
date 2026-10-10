@@ -149,12 +149,18 @@ block** inside an MCP tool result, carrying its bytes.
 attachment store, and returns image blocks alongside the text. The model then sees an image rather than a
 description of one.
 
-**What the model's route decides.** An image is only delivered when the calling Agent's model route reports
-`image` among its input modalities. A route that cannot take images gets a text note instead —
-`[image not delivered: this model route does not accept images]` — because a picture a route cannot read is
-worse than being told so. The same rule covers every other failure: no attachment store, an unreadable file, a
-file over 20 MB, an unsupported media type. **Nothing here can fail the delegation**; the answer the run
-produced always survives.
+**What the model's route decides, and why the rule is deliberately loose.** An image is refused only when the
+route **declares** input modalities and `image` is not among them — the harness's own rule, so that an
+undeclared route is left to the harness rather than second-guessed here. `deepseek-flash`, the default, declares
+`['text', 'image']`, so screenshots do arrive in an ordinary session.
+
+An earlier guard failed closed whenever the route could not be resolved, which silently turned every image into
+a text note in a session that could have displayed it. It does not any more: an unresolvable route delivers the
+image. When a route really does refuse images the note reads
+`[image not delivered: this model route declares no image input]`.
+
+The same note covers every other failure — no attachment store, an unreadable file, a file over 20 MB, an
+unsupported media type. **Nothing here can fail the delegation**; the answer the run produced always survives.
 
 **Sending pictures *in*.** The protocol accepts `input_image`, `local_image`, `image_url` and even audio, but this
 tool currently sends text only. Until that changes, name the **path** in the prompt: Codex opens the file itself

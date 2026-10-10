@@ -1,6 +1,23 @@
 # Changelog
 
+## 0.3.1
+
+The image guard was too strict, and it would have hidden the feature it was added for.
+
+0.3.0 refused an image whenever the calling route did not **report** `image` among its input modalities, and it
+failed closed: a route it could not resolve was treated as a route that cannot take images. The default
+`deepseek-flash` entry declares `['text', 'image']`, so a session that could display screenshots would instead
+have been told `[image not delivered: …]` for every one of them.
+
+The rule is now the harness's own — an image is refused only when the route **declares** modalities and `image`
+is not among them — and an unresolvable route delivers the image rather than withholding it. The route lookup
+also gained the fallback `dsh-plugin-lcu` uses, so a session header without a model still resolves.
+
+The rule is a pure function, `routeRefusesImages`, so the boundary is covered by tests instead of by whichever
+session happens to be running.
+
 ## 0.3.0
+
 
 Images a delegation produces now come back.
 
