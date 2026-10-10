@@ -73,3 +73,13 @@ test('a busy thread in another mode is not reported as skipped', () => {
     { reuse: undefined, skippedBusy: undefined },
   )
 })
+
+test('an explicit thread id wins over a caller-named directory', () => {
+  // Measured: a thread created in A, resumed with cwd B, still answered with A
+  // and still remembered A's conversation. So an explicit id is always honored,
+  // and the cwd only decides where a *new* thread is created.
+  assert.deepEqual(
+    chooseThread({ explicit: 'thread-a', configured: 'session', remembered: 'thread-b', inFlight: new Set(['thread-a']) }),
+    { reuse: 'thread-a', skippedBusy: undefined },
+  )
+})

@@ -177,9 +177,18 @@ The path must be absolute, must exist, and must be a directory; anything else is
 the problem rather than a run that quietly happens somewhere unexpected. It is a working directory, not a
 sandbox boundary — what a run may touch is the permission mode's decision.
 
-Naming a directory also starts a fresh Codex thread, because a thread belongs to the directory it was created
-in: continuing one somewhere else would be continuing a conversation about different files. So `cwd` and
-`threadMode: session`'s reuse do not combine, and the log says which directory a run used.
+**`cwd` decides the directory of a new thread; it never relocates an old one.** An explicit `thread_id` wins:
+the named thread is continued wherever it was created, and a `cwd` passed beside it changes the spawned
+process's directory but not the thread's. Measured on a real app-server — a thread created in `A`, resumed with
+`cwd: B` — the run still answered `CWD=/tmp/dsh-dirA-…` and still remembered what `A` had been told. So
+`thread_id` is the handle for "stop, ask me, then carry on", and it works with or without a `cwd`.
+
+The plugin's own `threadMode: session` reuse is a different thing and does not combine with `cwd`: that reuse is
+the plugin's choice rather than a caller's, and it can only reuse a thread in the directory it belongs to. The
+log names the directory and the images every run used.
+
+Passing a `cwd` that does not match a resumed thread's is not an error and does nothing to the thread — worth
+knowing, because it looks like it should move the work.
 
 ## Images
 
