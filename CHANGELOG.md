@@ -1,6 +1,21 @@
 # Changelog
 
+## 0.2.1
+
+`apply` now records the thread mode and the originator, so the log says which lifetime is in force without
+anyone reading the profile to find out.
+
+**The session-mode retry is narrowed to the failure it was meant for.** It wrapped every delegation, so a turn
+that failed for its own reasons was retried as a fresh thread — paying for the same work twice and hiding the
+real failure behind a second attempt. It now applies only to a resume the app-server refused.
+
+**A concurrency limit, measured rather than assumed.** Two delegations sent at once to one thread collide: the
+app-server answers `thread-store conflict: … already has an active writer` and the second fails, while
+`ephemeral` runs the same pair independently. `session` is therefore the wrong mode for parallel work, and both
+READMEs now say so.
+
 ## 0.2.0
+
 
 A delegation can now outlive its run.
 

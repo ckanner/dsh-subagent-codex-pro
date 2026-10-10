@@ -48,7 +48,7 @@ import type {
   SubagentStartRequestLike,
 } from './dsh-types.ts'
 import { settleJob } from './jobs.ts'
-import { delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
+import { CodexRunFailure, delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
 import { DEFAULT_ORIGINATOR } from './wire.ts'
 import { createCodexTool } from './tool.ts'
 import type { CodexPermissionMode } from './wire.ts'
@@ -241,7 +241,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   try {
     ctx.subagents.registerProvider(new CodexExecProvider(resolved))
     diag(`apply: provider "${resolved.providerName}" registered with agentOptions: true `
-      + `(efforts: ${KNOWN_EFFORTS.join('/')}, permission=${resolved.permissionMode}); presets=${JSON.stringify(presets)}`)
+      + `(efforts: ${KNOWN_EFFORTS.join('/')}, permission=${resolved.permissionMode}); `
+      + `threadMode=${resolved.threadMode} originator=${JSON.stringify(resolved.originator)}; `
+      + `presets=${JSON.stringify(presets)}`)
   } catch (error: unknown) {
     diag(`apply: provider registration FAILED: ${String(error)}`)
   }
@@ -347,7 +349,16 @@ export function apply(ctx: Context, config: Config = {}): void {
         // Codex state moved. That is this plugin's own bookkeeping, so a fresh
         // thread is the right repair; an id the caller passed explicitly is not
         // repaired silently, because continuing it was the whole request.
-        if (reuse !== undefined && explicit === undefined && mode === 'persistent') {
+        // Only a resume that the app-server refused is repaired here. A turn that
+        // failed for its own reasons must not be retried: that would pay for the
+        // same work twice and hide the real failure behind a second attempt.
+        if (
+          reuse !== undefined
+          && explicit === undefined
+          && mode === 'persistent'
+          && error instanceof CodexRunFailure
+          && error.facts.stage === 'thread-resume'
+        ) {
           diag(`run: remembered thread ${reuse} could not be resumed (${String(error)}) - starting a new one`)
           sessionThread.delete(String(agent.id))
           const outcome = await delegateOnce({

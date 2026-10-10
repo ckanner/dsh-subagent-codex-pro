@@ -172,6 +172,14 @@ an honest name, and the Codex CLI lists the thread either way.
 Because the originator cannot say where a thread came from, a persistent one is named
 `DSH · <the call's description>` through `thread/name/set`, which is what a person sees in the list.
 
+**One thread carries one turn at a time, so `session` is not for parallel work.** Two delegations sent at
+once from the same session both reach for the remembered thread, and the second fails at `thread/resume` with
+`thread-store conflict: … already has an active writer`. `ephemeral` and `persistent` have no such limit: every
+call gets its own thread. A session-mode call whose remembered thread cannot be resumed starts a fresh one, so
+it degrades rather than breaks — but it degrades silently, and the extra thread is not what `session` promised.
+Pick `session` for sequential work that benefits from a continuing conversation, and `persistent` or
+`ephemeral` when delegations run at the same time.
+
 **Why it is worth more than convenience.** A resumed thread keeps the same prompt prefix, so the endpoint's
 cache keeps hitting. Measured on the Codex side, 93–99% of input tokens came from cache; the same work driven
 through a plan-usage route measured 0%, because that route refuses every cache control.

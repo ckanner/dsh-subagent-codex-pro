@@ -109,7 +109,7 @@ interface FailureFacts {
 }
 
 /** A run failure, kept for its structured facts. */
-class CodexRunFailure extends Error {
+export class CodexRunFailure extends Error {
   readonly facts: FailureFacts
 
   constructor(facts: FailureFacts, cause?: unknown) {
