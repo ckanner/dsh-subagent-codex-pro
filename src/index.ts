@@ -133,6 +133,25 @@ export interface Config {
 }
 
 /**
+ * Check one caller-named image path.
+ *
+ * The path must be absolute and must name a file this plugin could hand the
+ * app-server. Whether it exists is checked where the run is prepared, next to
+ * the check for the working directory, because that is where a real path is.
+ *
+ * @param requested - the path a call named.
+ * @returns the path, unchanged.
+ * @throws when it is not an absolute path.
+ */
+export function checkedImagePath(requested: string): string {
+  if (requested.trim() === '') throw new Error('subagent_codex: image paths must not be empty')
+  if (!requested.startsWith('/')) {
+    throw new Error(`subagent_codex: image paths must be absolute, got "${requested}"`)
+  }
+  return requested
+}
+
+/**
  * Check a caller-named working directory's shape.
  *
  * Only the shape is checked — absolute and non-empty — so the rule is testable
@@ -553,6 +572,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       readonly threadMode?: 'ephemeral' | 'persistent'
       readonly threadId?: string
       readonly cwd?: string
+      readonly images?: readonly string[]
     }
 
     /** Run one call over the app-server protocol. */
@@ -580,6 +600,25 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (!stat.isDirectory()) throw new Error(`subagent_codex: cwd is not a directory: ${runCwd}`)
       }
 
+      // Images are checked here, before anything is spawned: a path that does not
+      // exist should fail the call, not start a run that silently lacks the
+      // picture the task was about.
+      let runImages: string[] | undefined
+      if (call.images !== undefined && call.images.length > 0) {
+        runImages = []
+        for (const image of call.images) {
+          const path = checkedImagePath(image)
+          let stat
+          try {
+            stat = statSync(path)
+          } catch {
+            throw new Error(`subagent_codex: image does not exist: ${path}`)
+          }
+          if (!stat.isFile()) throw new Error(`subagent_codex: image is not a file: ${path}`)
+          runImages.push(path)
+        }
+      }
+
       // An explicit thread id wins; then an explicit mode; then the session's
       // remembered thread; then the configured default.
       const configured = resolved.threadMode
@@ -603,7 +642,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       diag(`run: model=${call.model ?? '<default>'} effort=${call.reasoningEffort ?? '<default>'} `
         + `thread=${mode}${reuse === undefined ? '' : ` resume=${reuse}`} `
         + `cwd=${runCwd}${call.cwd === undefined ? '' : ' (call-named)'} `
-        + `prompt=${String(call.prompt.length)}B via=app-server`)
+        + `images=${String(runImages?.length ?? 0)} prompt=${String(call.prompt.length)}B via=app-server`)
       // Claim the thread for the whole call, so a concurrent delegation sees it
       // as busy before it tries rather than failing when it does.
       if (reuse !== undefined) inFlight.add(reuse)
@@ -619,6 +658,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           threadId: reuse,
           originator: resolved.originator,
           runTimeoutMs: resolved.runTimeoutMs,
+          images: runImages,
           threadName: threadNameFor(call.label),
           env: resolved.env,
           signal,
@@ -658,6 +698,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             threadMode: mode,
             originator: resolved.originator,
             runTimeoutMs: resolved.runTimeoutMs,
+            images: runImages,
             threadName: threadNameFor(call.label),
             env: resolved.env,
             signal,

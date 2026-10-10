@@ -102,6 +102,24 @@ run done: text=8B
 
 一次已验证的端到端运行：30 秒墙钟时间，模型的 `PROBE_OK` 作为工具结果返回。真实 app-server 运行也由 live 测试覆盖 —— 它开一个带 `reasoningEffort` 的 thread，以及一个带 `effort` 的 turn。
 
+## 让 Codex 看图
+
+`images` 把图片和任务一起交给 Codex —— 它**收到的是图**，而不是被告知"自己去打开某个文件"：
+
+```js
+tools.subagent_codex({
+  description: "照着这张设计稿做",
+  prompt: "把这个界面的布局在下面的组件里重建出来。",
+  images: ["/tmp/design.png"],
+})
+```
+
+每个路径必须是**绝对路径**、必须**存在**、且必须是**文件**；否则在启动任何东西之前就失败。这道检查不是装饰：**app-server 会静默忽略不存在的 `localImage` 路径** —— 实测如此，turn 照常完成、没有任何报错项 —— 所以不检查的话，一个打错的路径会产出一个**悄悄少了那张图**的委派。
+
+图片以 app-server 的 **`localImage`** 变体发送，这是它**唯一不需要字节传输**就接受的形态：它的 `image` 变体要一个本插件无法构造的 `ImageReference`，而 `{type:'image', data, mimeType}` 和 `data:` URL **都被直接拒绝**。本机路径则无需编码。
+
+给出图片**不会打扰线程**：图片属于这一轮 turn、不属于线程，所以被续接的线程照样可以再看一张新图。
+
 ## 指定运行目录
 
 委派默认在**会话的工作目录**里跑。`cwd` 可以指定另一个：
@@ -187,6 +205,7 @@ tools.subagent_codex({ description: "…", prompt: "…", run_in_background: tru
 | 每次调用的 `model` / `reasoning_effort` | ✅ |
 | 返回最终消息 | ✅ |
 | 本次运行产生的图片（截图、看过的文件） | ✅ 当调用方的模型路由接受图片时 |
+| 交给本次运行的图片（`images`，绝对路径） | ✅ |
 | `run_in_background` + 通过 `job_output` 看进度 | ✅ |
 | app-server 协议（握手、线程生命周期、批准决定） | ✅ |
 | 交互式批准 | 按设计没有 —— 委派运行是无人值守的，和官方 provider 一样 |

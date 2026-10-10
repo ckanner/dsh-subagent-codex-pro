@@ -551,7 +551,12 @@ export class CodexAppServerWire {
    * @param effort - per-turn thinking level, if the caller chose one.
    * @returns the selected output and its stop reason.
    */
-  async runTurn(texts: readonly TaskText[], signal?: AbortSignal, effort?: string): Promise<WireRunResult> {
+  async runTurn(
+    texts: readonly TaskText[],
+    signal?: AbortSignal,
+    effort?: string,
+    images: readonly string[] = [],
+  ): Promise<WireRunResult> {
     const completion = Promise.withResolvers<TurnCompletion>()
     this.#turnCompleted = completion
     const threadId = this.#threadId
@@ -560,7 +565,13 @@ export class CodexAppServerWire {
         object(
           await this.#guarded(this.#transport.request('turn/start', {
             threadId,
-            input: texts.map((text) => ({ type: 'text', text, text_elements: [] })),
+            // Images first, as `localImage`: the app-server enumerates its own
+            // input variants and rejects anything else, and a host path is the
+            // one form it takes without the bytes travelling at all.
+            input: [
+              ...images.map((path) => ({ type: 'localImage', path })),
+              ...texts.map((text) => ({ type: 'text', text, text_elements: [] })),
+            ],
             // ── this package's addition ──────────────────────────────────────
             // The per-turn thinking level. The official adapter never sends it.
             ...effort === undefined ? {} : { effort },

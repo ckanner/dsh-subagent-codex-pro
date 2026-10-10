@@ -1,6 +1,33 @@
 # Changelog
 
+## 0.5.0
+
+Pictures now travel both ways. `images` hands Codex pictures alongside the task:
+
+```js
+tools.subagent_codex({ description: "Match this design", prompt: "…", images: ["/tmp/design.png"] })
+```
+
+Each path must be absolute, must exist, and must be a file, and the call fails before anything is spawned
+otherwise. That check is load-bearing rather than decorative: **the app-server silently ignores a `localImage`
+path that does not exist** — measured, with the turn completing normally and not one error item — so an
+unchecked typo would produce a delegation that quietly lacks the picture its task was about.
+
+The pictures go out as the app-server's `localImage` variant, which the error messages themselves identified as
+one of `text`, `image`, `localImage`, `audio`, `localAudio`. Its `image` variant wants an `ImageReference` this
+plugin cannot construct — both `{type:'image', data, mimeType}` and a `data:` URL are rejected with
+`did not match any variant of untagged enum ImageReference` — so a host path is not a workaround but the form
+that needs no encoding at all.
+
+A delegation prompt remains text. An image block arriving there is refused with a message naming the `images`
+parameter instead of the old flat refusal, because the harness can put an image in a prompt but a tool call's
+arguments are JSON and the model has no bytes to put in them.
+
+Verified live: a delegation whose prompt never mentioned a path, given one image, answered "Settings, Models" —
+the two words on it.
+
 ## 0.4.0
+
 
 A delegation can run in a directory of its own.
 

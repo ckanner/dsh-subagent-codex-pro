@@ -58,6 +58,13 @@ export interface CodexRunSpec {
    */
   readonly runTimeoutMs?: number | undefined
   /**
+   * Absolute paths of images to put in front of Codex with the task.
+   *
+   * The app-server takes these as `localImage` blocks, so the picture reaches the
+   * model as a picture and no bytes travel through the protocol.
+   */
+  readonly images?: readonly string[] | undefined
+  /**
    * A name for a persistent thread, shown in the Codex application's thread list.
    *
    * Ignored for `ephemeral`: a thread that leaves nothing behind has no list to
@@ -166,11 +173,13 @@ function thrown(value: unknown): Error {
  * @returns the exact non-empty text block sequence.
  */
 export function textTask(prompt: PromptBlocks): string[] {
-  if (prompt.length === 0) throw new Error('codex-pro: the one-shot task must contain only text blocks')
+  if (prompt.length === 0) throw new Error('codex-pro: a delegation prompt must be text; images reach Codex through the '
+      + '`images` parameter, which takes absolute paths')
   const texts: string[] = []
   for (const block of prompt) {
     if (block.type !== 'text' || typeof block.text !== 'string') {
-      throw new Error('codex-pro: the one-shot task must contain only text blocks')
+      throw new Error('codex-pro: a delegation prompt must be text; images reach Codex through the '
+      + '`images` parameter, which takes absolute paths')
     }
     texts.push(block.text)
   }
@@ -364,7 +373,10 @@ export async function startCodexRun(
   /** Settle the run without ever rejecting: a failure becomes a stop reason. */
   const settle = async (): Promise<CodexRunOutcome> => {
     try {
-      const terminal = await Promise.race([wire.runTurn(texts, runAbort.signal, spec.effort), processFailure])
+      const terminal = await Promise.race([
+        wire.runTurn(texts, runAbort.signal, spec.effort, spec.images ?? []),
+        processFailure,
+      ])
       if (terminal.stopReason === 'completed') {
         return { output: terminal.output, stopReason: terminal.stopReason, threadId: wire.threadId, images: terminal.images }
       }
@@ -507,6 +519,8 @@ export async function delegateOnce(options: {
   readonly threadName?: string | undefined
   /** Deadline for the whole delegation in milliseconds; `0` disables it. */
   readonly runTimeoutMs?: number | undefined
+  /** Absolute paths of images to show Codex alongside the task. */
+  readonly images?: readonly string[] | undefined
   readonly env?: Readonly<Record<string, string>> | undefined
   readonly signal: AbortSignal
   /** Called once the run is published, for diagnostics. */
@@ -533,6 +547,7 @@ export async function delegateOnce(options: {
         resumeThreadId: options.threadId,
         originator: options.originator,
         runTimeoutMs: options.runTimeoutMs,
+        images: options.images,
         threadName: options.threadName,      env: options.env,
       onProgress: options.onProgress,
     },

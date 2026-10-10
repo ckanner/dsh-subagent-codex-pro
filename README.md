@@ -136,6 +136,31 @@ A verified end-to-end run: 30 s wall clock, the model's `PROBE_OK` returned as
 the tool result. A real app-server run is also covered by the live test, which
 opens a thread with `reasoningEffort` and a turn with `effort`.
 
+## Showing Codex a picture
+
+`images` hands Codex pictures alongside the task, so it receives them as pictures instead of being told to go
+and open a file:
+
+```js
+tools.subagent_codex({
+  description: "Match this design",
+  prompt: "Rebuild this screen's layout in the component below.",
+  images: ["/tmp/design.png"],
+})
+```
+
+Each path must be absolute, must exist, and must be a file; anything else fails the call before anything is
+spawned. That check is not decoration: **the app-server silently ignores a `localImage` path that does not
+exist** — measured, with the turn completing normally and no error item — so an unchecked typo would produce a
+delegation that quietly lacks the picture the task was about.
+
+The pictures are sent as the app-server's `localImage` variant, which is the one form it accepts without the
+bytes travelling: its `image` variant wants an `ImageReference` this plugin cannot construct, and both
+`{type:'image', data, mimeType}` and a `data:` URL are rejected outright. A host path needs no encoding.
+
+Naming images does not disturb the thread: they belong to the turn, not to the thread, so a resumed thread can
+be shown a new picture.
+
 ## Choosing the directory
 
 A delegation runs in the session's working directory by default. `cwd` names another one:
@@ -270,6 +295,7 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 | `model` / `reasoning_effort` per call | ✅ |
 | final message returned | ✅ |
 | images the run produced (screenshots, viewed files) | ✅ when the calling model route accepts images |
+| images handed to the run (`images`, absolute paths) | ✅ |
 | `run_in_background` + progress via `job_output` | ✅ |
 | app-server protocol (handshake, thread lifecycle, approval decisions) | ✅ |
 | interactive approvals | by design none — a delegated run is unattended, as the official provider is |

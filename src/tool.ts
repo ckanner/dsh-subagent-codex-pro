@@ -31,6 +31,8 @@ export interface CodexCall {
   readonly threadId?: string
   /** Working directory for the delegation, when the call named one. */
   readonly cwd?: string
+  /** Absolute paths of images to show Codex alongside the task. */
+  readonly images?: readonly string[]
 }
 
 /** Everything the tool needs that does not change per call. */
@@ -125,6 +127,14 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         prompt: {
           type: 'string',
           description: 'The complete task for Codex, including everything it needs and cannot ask for.',
+        },
+        images: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Absolute paths of images to show Codex alongside the task — a screenshot it'
+            + ' should look at, a design it should match. Each path must exist and be a readable image.'
+            + ' Codex receives them as images, so it does not have to go and open the files itself.'
+            + ' Prefer this over writing a path into `prompt`.',
         },
         cwd: {
           type: 'string',
@@ -242,6 +252,9 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ? request.description
         : 'Codex delegation'
       const cwd = typeof request.cwd === 'string' && request.cwd !== '' ? request.cwd : undefined
+      const images = Array.isArray(request.images)
+        ? request.images.filter((value): value is string => typeof value === 'string' && value !== '')
+        : undefined
       const threadMode = request.thread_mode === 'ephemeral' || request.thread_mode === 'persistent'
         ? request.thread_mode
         : undefined
@@ -256,6 +269,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ...(threadMode === undefined ? {} : { threadMode }),
         ...(threadId === undefined ? {} : { threadId }),
         ...(cwd === undefined ? {} : { cwd }),
+        ...(images === undefined || images.length === 0 ? {} : { images }),
       }
       if (options.backgroundEnabled && request.run_in_background === true) {
         return { kind: 'background' as const, jobId: options.startBackground(call) }

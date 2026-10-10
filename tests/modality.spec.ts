@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-const { routeRefusesImages, withImageNote, checkedWorkdir } = await import('../src/index.ts')
+const { routeRefusesImages, withImageNote, checkedWorkdir, checkedImagePath } = await import('../src/index.ts')
 
 test('the default route declares image input and is not refused', () => {
   assert.equal(routeRefusesImages({ inputModalities: ['text', 'image'] }), false)
@@ -55,4 +55,11 @@ test('a caller-named working directory must be absolute', () => {
   assert.throws(() => checkedWorkdir('./smoke'), /absolute path/)
   assert.throws(() => checkedWorkdir('~/smoke'), /absolute path/)
   assert.throws(() => checkedWorkdir('   '), /must not be empty/)
+})
+
+test('a caller-named image path must be absolute', () => {
+  assert.equal(checkedImagePath('/tmp/shot.png'), '/tmp/shot.png')
+  assert.throws(() => checkedImagePath('shot.png'), /must be absolute/)
+  assert.throws(() => checkedImagePath('./shot.png'), /must be absolute/)
+  assert.throws(() => checkedImagePath('  '), /must not be empty/)
 })
