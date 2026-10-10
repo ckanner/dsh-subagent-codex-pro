@@ -298,9 +298,10 @@ test('image blocks from the runner reach the tool result and its rendering', asy
   assert.equal(result.content[1]?.type, 'image')
   assert.equal(result.content[1]?.attachment, 'att-1')
 
-  // The model-facing text stays text, with the image counted rather than inlined.
+  // The model-facing text stays text. A background call reads only this, which
+  // is why the runner puts the image's location in the text as well.
   const rendered = tool.output.render({}, result) as { type: string, text: string }[]
-  assert.equal(rendered[0]?.text, 'shot taken\n\n[1 image]')
+  assert.equal(rendered[0]?.text, 'shot taken')
 })
 
 test('a text-only runner still returns a content block the schema admits', async () => {

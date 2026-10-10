@@ -212,11 +212,11 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
           .filter((block) => block.type === 'text' && typeof block.text === 'string')
           .map((block) => block.text as string)
           .join('\n\n')
-        const images = content.filter((block) => block.type === 'image').length
-        const body = text === '' ? '(the delegation produced no text)' : text
+        // The text already names the images, because a background call has only
+        // the text to go on; repeating the count here would say it twice.
         return [{
           type: 'text' as const,
-          text: images === 0 ? body : `${body}\n\n[${String(images)} image${images === 1 ? '' : 's'}]`,
+          text: text === '' ? '(the delegation produced no text)' : text,
         }]
       },
     },

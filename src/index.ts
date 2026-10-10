@@ -179,6 +179,31 @@ interface ContentBlockLike {
   readonly attachment?: unknown
 }
 
+/**
+ * A line naming where each image is, appended to the text.
+ *
+ * A foreground call carries the pictures as blocks, but a background call's
+ * result is a string by contract — its reader sees this text and nothing else. So
+ * the paths go in the text as well: a screenshot a background delegation took is
+ * still a file on this host, and naming it is the difference between the work
+ * being usable and being lost.
+ *
+ * @param text - the delegation's answer.
+ * @param images - the images the run produced.
+ * @returns the answer with the image line appended.
+ */
+export function withImageNote(
+  text: string,
+  images: readonly { readonly path?: string }[],
+): string {
+  if (images.length === 0) return text
+  const paths = images.map((image) => image.path).filter((path): path is string => path !== undefined)
+  const label = images.length === 1 ? 'image' : 'images'
+  return paths.length === 0
+    ? `${text}\n\n[${String(images.length)} ${label}]`
+    : `${text}\n\n[${String(images.length)} ${label}: ${paths.join(', ')}]`
+}
+
 /** Stable text for an image the model could not be handed. */
 function imageNote(reason: string): string {
   return `[image not delivered: ${reason}]`
@@ -455,9 +480,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       try {
         const refs = await store.saveImages(payloads)
-        const blocks: ContentBlockLike[] = [{ type: 'text', text }, ...refs.map((ref) => ({ type: 'image', attachment: ref }))]
+        const blocks: ContentBlockLike[] = [
+          { type: 'text', text: withImageNote(text, images) },
+          ...refs.map((ref) => ({ type: 'image', attachment: ref })),
+        ]
         diag(`deliver: ${String(refs.length)} image(s) attached to the delegation result`)
-        return { text, threadId: outcome.threadId, blocks }
+        return { text: withImageNote(text, images), threadId: outcome.threadId, blocks }
       } catch (error: unknown) {
         notesFor(`the attachment store refused them: ${String(error)}`.slice(0, 200))
         return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }

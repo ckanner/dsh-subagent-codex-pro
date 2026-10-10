@@ -162,6 +162,12 @@ image. When a route really does refuse images the note reads
 The same note covers every other failure — no attachment store, an unreadable file, a file over 20 MB, an
 unsupported media type. **Nothing here can fail the delegation**; the answer the run produced always survives.
 
+**A background call gets paths, not pictures.** A foreground delegation returns image blocks, so the model
+sees the picture. A `run_in_background` delegation returns a job id, and everything read back through
+`job_output` is text by contract — so its images are reported as paths in that text instead:
+`[1 image: /Users/…/shot.png]`. The file is on this host either way. For a screenshot you want the model to
+actually look at, delegate in the foreground.
+
 **Sending pictures *in*.** The protocol accepts `input_image`, `local_image`, `image_url` and even audio, but this
 tool currently sends text only. Until that changes, name the **path** in the prompt: Codex opens the file itself
 with its own image tool, which is verified — asked to describe a screenshot by path, it read out the providers

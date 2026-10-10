@@ -1,6 +1,20 @@
 # Changelog
 
+## 0.3.2
+
+A background delegation no longer loses its images.
+
+`run_in_background` returns a job id, and everything read back through `job_output` is text by contract, so the
+image blocks a foreground call returns were simply dropped — silently, and with no trace of where the picture
+went. A screenshot taken by a background delegation is still a file on this host, so the text now names it:
+`[1 image: /Users/…/shot.png]`. A foreground call is unchanged and still delivers the image itself; `render` no
+longer repeats the count, because the text already carries it.
+
+Found by looking at a real session rather than at the code: a screenshot delegation had been started in the
+background, and there was no path in the answer it would eventually produce.
+
 ## 0.3.1
+
 
 The image guard was too strict, and it would have hidden the feature it was added for.
 
