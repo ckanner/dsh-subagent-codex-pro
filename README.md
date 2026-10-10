@@ -136,6 +136,31 @@ A verified end-to-end run: 30 s wall clock, the model's `PROBE_OK` returned as
 the tool result. A real app-server run is also covered by the live test, which
 opens a thread with `reasoningEffort` and a turn with `effort`.
 
+## Images
+
+Codex can look at pictures and can take screenshots; this tool can now hand those pictures back.
+
+**What arrives.** The app-server reports an image two ways, and both are captured. `imageView` names a **file on
+this host** — the bytes are never inlined, because the host that asked for the work is expected to read the file
+itself, which is exactly what this plugin does. A computer-use screenshot instead arrives as an **image content
+block** inside an MCP tool result, carrying its bytes.
+
+**What is delivered.** The plugin reads the file (or decodes the block), hands the bytes to the harness's
+attachment store, and returns image blocks alongside the text. The model then sees an image rather than a
+description of one.
+
+**What the model's route decides.** An image is only delivered when the calling Agent's model route reports
+`image` among its input modalities. A route that cannot take images gets a text note instead —
+`[image not delivered: this model route does not accept images]` — because a picture a route cannot read is
+worse than being told so. The same rule covers every other failure: no attachment store, an unreadable file, a
+file over 20 MB, an unsupported media type. **Nothing here can fail the delegation**; the answer the run
+produced always survives.
+
+**Sending pictures *in*.** The protocol accepts `input_image`, `local_image`, `image_url` and even audio, but this
+tool currently sends text only. Until that changes, name the **path** in the prompt: Codex opens the file itself
+with its own image tool, which is verified — asked to describe a screenshot by path, it read out the providers
+listed on it.
+
 ## Thread lifetime
 
 Every delegation used to open an ephemeral thread — the app-server deletes it when the connection ends, so
@@ -204,6 +229,7 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 |---|---|
 | `model` / `reasoning_effort` per call | ✅ |
 | final message returned | ✅ |
+| images the run produced (screenshots, viewed files) | ✅ when the calling model route accepts images |
 | `run_in_background` + progress via `job_output` | ✅ |
 | app-server protocol (handshake, thread lifecycle, approval decisions) | ✅ |
 | interactive approvals | by design none — a delegated run is unattended, as the official provider is |

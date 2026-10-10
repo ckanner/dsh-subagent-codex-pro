@@ -46,6 +46,22 @@ const THREAD_PERMISSION_PARAMS = {
 /** The configured permission mode. */
 export type CodexPermissionMode = keyof typeof THREAD_PERMISSION_PARAMS
 
+/**
+ * One image the run produced.
+ *
+ * Two shapes reach here. `imageView` names a file on this host, which the caller
+ * can read directly — the app-server never inlines it. An MCP tool result carries
+ * the bytes, which is how a computer-use screenshot arrives.
+ */
+export interface CodexImage {
+  /** A host path to read, for `imageView`. */
+  readonly path?: string
+  /** Base64 bytes, for an image an MCP tool returned. */
+  readonly data?: string
+  /** The bytes' media type, when the source named one. */
+  readonly mimeType?: string
+}
+
 /** The stop reasons one run can end with. */
 export type CodexStopReason = 'completed' | 'max-tokens' | 'error' | 'aborted'
 
@@ -79,6 +95,8 @@ export interface TurnCompletion {
 export interface WireRunResult {
   readonly output: readonly { readonly type: 'text'; readonly text: string }[]
   readonly stopReason: CodexStopReason
+  /** Images the run produced, for a caller that can deliver them. */
+  readonly images: readonly CodexImage[]
 }
 
 /** A decoded protocol object. */
@@ -294,6 +312,8 @@ export class CodexAppServerWire {
   #lastFinalAnswer: string | undefined
   #lastUnphasedAnswer: string | undefined
   #diagnostic: string | undefined
+  /** Images the run produced, in the order the app-server reported them. */
+  #images: CodexImage[] = []
   #failure: CodexFailureFacts | undefined
   #diagnosticOrder = 0
   #observationOrder = 0
@@ -479,6 +499,44 @@ export class CodexAppServerWire {
     }
   }
 
+  /** The images this run produced, in arrival order. */
+  get images(): readonly CodexImage[] {
+    return this.#images
+  }
+
+  /**
+   * Retain the images one completed item carries.
+   *
+   * `imageView` reports a path rather than bytes: the app-server expects the host
+   * that asked for the work to read the file itself, which is exactly what the
+   * caller can do. An MCP tool result is the other shape — a computer-use
+   * screenshot arrives as an image content block inside it.
+   *
+   * @param item - one completed item.
+   */
+  #recordImages(item: Record0): void {
+    if (item.type === 'imageView' && typeof item.path === 'string' && item.path !== '') {
+      this.#images.push({ path: item.path })
+      return
+    }
+    if (item.type !== 'mcpToolCall') return
+    const result = item.result
+    if (typeof result !== 'object' || result === null) return
+    const content = (result as Record0).content
+    if (!Array.isArray(content)) return
+    for (const block of content) {
+      if (typeof block !== 'object' || block === null) continue
+      const image = block as Record0
+      if (image.type !== 'image') continue
+      if (typeof image.data === 'string' && image.data !== '') {
+        this.#images.push({
+          data: image.data,
+          ...(typeof image.mimeType === 'string' ? { mimeType: image.mimeType } : {}),
+        })
+      }
+    }
+  }
+
   /** The thread this wire is working in, once it has one. */
   get threadId(): string | undefined {
     return this.#threadId
@@ -534,7 +592,7 @@ export class CodexAppServerWire {
       if (parsed.sandboxFailure === true) {
         this.#recordDiagnostic('sandbox execution', 'failed', 'Codex reported a sandbox failure', completed.order)
       }
-      if (parsed.maxTokens === true) return { output: this.#collectOutput(), stopReason: 'max-tokens' }
+      if (parsed.maxTokens === true) return { output: this.#collectOutput(), stopReason: 'max-tokens', images: this.images }
       const detail = status === 'failed' ? `: ${parsed.category}` : ''
       throw new Error(`${P}: Codex turn ended with status ${String(status)}${detail}`)
     }
@@ -543,7 +601,7 @@ export class CodexAppServerWire {
       this.#recordFailure({ stage: 'turn', category: 'invalid-result' })
       throw new Error(`${P}: Codex completed without a final answer`)
     }
-    return { output, stopReason: 'completed' }
+    return { output, stopReason: 'completed', images: this.images }
   }
 
   /**
@@ -737,6 +795,7 @@ export class CodexAppServerWire {
       if (id !== this.#turnId) return
       const item = object(fields.item, 'item/completed item')
       if (this.#recordDeclinedItem(item, order)) return
+      this.#recordImages(item)
       if (item.type !== 'agentMessage') {
         // Commands, file changes, and searches: the interesting part of a long run.
         this.#progress(describeItem(item))

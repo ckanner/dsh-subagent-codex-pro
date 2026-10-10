@@ -54,8 +54,18 @@ export interface CodexToolOptions {
   /** Whether a call may override the thread mode and resume a thread. */
   readonly threadControlEnabled: boolean
   /** Run one delegation and return its final text and the thread it used. */
-  readonly run: (request: CodexCall & { readonly signal: AbortSignal }) =>
-    Promise<{ readonly text: string; readonly threadId: string | undefined }>
+  readonly run: (request: CodexCall & { readonly signal: AbortSignal }) => Promise<{
+    readonly text: string
+    readonly threadId: string | undefined
+    /**
+     * Content blocks to hand the model, when the run produced more than text.
+     *
+     * A foreground delegation returns these so a screenshot the run took reaches
+     * the model as an image. A background job's result is a string by contract,
+     * so its images are reported by host path in the text instead.
+     */
+    readonly blocks?: readonly { readonly type: string }[] | undefined
+  }>
   /**
    * Start one delegation as a background job.
    *
@@ -161,11 +171,18 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
       additionalProperties: false,
     },
     output: {
-      // A background call returns a handle, a foreground call returns the answer.
+      // A foreground call answers with content blocks, so an image the run
+      // produced reaches the model as an image rather than as a description of
+      // one. A background call answers with the job handle its reader collects.
       schema: options.backgroundEnabled
         ? {
             oneOf: [
-              { type: 'string' },
+              {
+                type: 'object',
+                additionalProperties: false,
+                properties: { content: { type: 'array', items: {} } },
+                required: ['content'],
+              },
               {
                 type: 'object',
                 additionalProperties: false,
@@ -177,15 +194,31 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
               },
             ],
           }
-        : { type: 'string' },
-      render: (_args: unknown, value: unknown) => [{
-        type: 'text' as const,
-        text: typeof value === 'string'
-          ? value
-          : isBackgroundHandle(value)
-            ? `Started as background job ${value.jobId}. Collect its result with job_output.`
-            : JSON.stringify(value),
-      }],
+        : {
+            type: 'object',
+            additionalProperties: false,
+            properties: { content: { type: 'array', items: {} } },
+            required: ['content'],
+          },
+      render: (_args: unknown, value: unknown) => {
+        if (isBackgroundHandle(value)) {
+          return [{
+            type: 'text' as const,
+            text: `Started as background job ${value.jobId}. Collect its result with job_output.`,
+          }]
+        }
+        const content = isContentResult(value) ? value.content : []
+        const text = content
+          .filter((block) => block.type === 'text' && typeof block.text === 'string')
+          .map((block) => block.text as string)
+          .join('\n\n')
+        const images = content.filter((block) => block.type === 'image').length
+        const body = text === '' ? '(the delegation produced no text)' : text
+        return [{
+          type: 'text' as const,
+          text: images === 0 ? body : `${body}\n\n[${String(images)} image${images === 1 ? '' : 's'}]`,
+        }]
+      },
     },
     async execute(args: unknown, exec: { readonly signal: AbortSignal }): Promise<unknown> {
       const request = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
@@ -217,10 +250,16 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
       }
       // The runner owns how a thread id reaches the model: it appends the marker
       // to the text, so a background job's collected result carries the id too.
-      const { text } = await options.run({ ...call, signal: exec.signal })
-      return text
+      const { text, blocks } = await options.run({ ...call, signal: exec.signal })
+      return { content: blocks ?? [{ type: 'text', text }] }
     },
   }
+}
+
+/** Whether a tool result carries content blocks. */
+function isContentResult(value: unknown): value is { content: readonly { type: string; text?: string }[] } {
+  return typeof value === 'object' && value !== null
+    && Array.isArray((value as { content?: unknown }).content)
 }
 
 /** Whether a tool result is the background handle shape. */

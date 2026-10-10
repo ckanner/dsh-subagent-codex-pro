@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto'
 
 import { LineTransport, type JsonRpcMessage } from './jsonrpc.ts'
 import { CodexAppServerWire, DEFAULT_ORIGINATOR, type CodexPermissionMode, type CodexStopReason } from './wire.ts'
-import type { CodexThreadMode } from './wire.ts'
+import type { CodexImage, CodexThreadMode } from './wire.ts'
 
 /** Default grace between termination tiers. */
 const DEFAULT_DISPOSE_GRACE_MS = 3_000
@@ -79,6 +79,13 @@ export interface CodexRunOutcome {
    * the only handle `resumeThreadId` accepts.
    */
   readonly threadId?: string | undefined
+  /**
+   * Images the run produced.
+   *
+   * Reported even on a failed run: a screenshot taken before the failure is
+   * still a screenshot the user asked for.
+   */
+  readonly images?: readonly CodexImage[] | undefined
 }
 
 /** The published run. */
@@ -325,7 +332,7 @@ export async function startCodexRun(
     try {
       const terminal = await Promise.race([wire.runTurn(texts, runAbort.signal, spec.effort), processFailure])
       if (terminal.stopReason === 'completed') {
-        return { output: terminal.output, stopReason: terminal.stopReason, threadId: wire.threadId }
+        return { output: terminal.output, stopReason: terminal.stopReason, threadId: wire.threadId, images: terminal.images }
       }
       await new Promise((resolve) => { setImmediate(resolve) })
       const facts = withProcessOutcome(wire.collectFailure())
@@ -336,6 +343,7 @@ export async function startCodexRun(
         stopReason: terminal.stopReason,
         diagnostic: permission === undefined ? failure : `${failure}\n${permission}`,
         threadId: wire.threadId,
+        images: terminal.images,
       }
     } catch (error: unknown) {
       await new Promise((resolve) => { setImmediate(resolve) })
@@ -347,6 +355,7 @@ export async function startCodexRun(
         stopReason: runAbort.signal.aborted ? 'aborted' : 'error',
         diagnostic: permission === undefined ? failure : `${failure}\n${permission}`,
         threadId: wire.threadId,
+        images: wire.images,
       }
     }
   }
@@ -432,11 +441,14 @@ export function chooseThread(input: {
 export class CodexDelegationFailure extends Error {
   /** The thread the failed run used, when the app-server had got that far. */
   readonly threadId: string | undefined
+  /** Images the failed run produced before it failed. */
+  readonly images: readonly CodexImage[]
 
-  constructor(message: string, threadId: string | undefined) {
+  constructor(message: string, threadId: string | undefined, images: readonly CodexImage[] = []) {
     super(message)
     this.name = 'CodexDelegationFailure'
     this.threadId = threadId
+    this.images = images
   }
 }
 
@@ -461,7 +473,11 @@ export async function delegateOnce(options: {
   readonly onStart?: (id: string) => void
   /** Narrates notable child activity. */
   readonly onProgress?: ((text: string) => void) | undefined
-}): Promise<{ readonly text: string; readonly threadId: string | undefined }> {
+}): Promise<{
+  readonly text: string
+  readonly threadId: string | undefined
+  readonly images: readonly CodexImage[]
+}> {
   const run = await startCodexRun(
     [{ type: 'text', text: options.prompt }],
     {
@@ -486,13 +502,14 @@ export async function delegateOnce(options: {
     const outcome = await run.result
     const text = outcome.output.map((block) => block.text).join('\n\n')
       if (outcome.stopReason === 'completed' && text !== '') {
-        return { text, threadId: outcome.threadId }
+        return { text, threadId: outcome.threadId, images: outcome.images ?? [] }
       }
     // A failure still reports its thread: a persistent thread that half-ran is
     // still one the user may want to open or clean up.
     throw new CodexDelegationFailure(
       outcome.diagnostic ?? `codex-pro: the run ended as ${outcome.stopReason}`,
       outcome.threadId,
+      outcome.images ?? [],
     )
   } finally {
     await run.teardown()

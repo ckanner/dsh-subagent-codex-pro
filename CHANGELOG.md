@@ -1,6 +1,29 @@
 # Changelog
 
+## 0.3.0
+
+Images a delegation produces now come back.
+
+The app-server reports them two ways and both are captured. `imageView` names a file on this host — the bytes
+are never inlined, because the host that asked for the work is expected to read the file itself — while a
+computer-use screenshot arrives as an image content block inside an MCP tool result. The plugin reads or decodes
+whichever it gets, hands the bytes to the harness's attachment store, and returns image blocks beside the text,
+so the model sees a picture instead of a description of one.
+
+An image is only delivered when the calling Agent's model route reports `image` among its input modalities, the
+same guard `dsh-plugin-lcu` applies to its screenshots. Everything else — no store, an unreadable file, over
+20 MB, an unsupported type, a route that cannot take images — becomes a text note. None of it can fail the
+delegation: the answer the run produced always survives.
+
+Verified against a real app-server through this package's own code: asked to open a file by path, Codex read the
+providers listed on the screenshot aloud, and the run reported one captured image with its host path.
+
+Sending images *in* is not implemented. The protocol accepts `input_image`, `local_image`, `image_url` and
+audio, but this tool still sends text only; naming a path in the prompt remains the working route, and both
+READMEs now document what each side actually supports.
+
 ## 0.2.2
+
 
 **`session` mode no longer collides with itself.** A thread carries one turn at a time, so two delegations sent
 together from one session both reached for the remembered thread and the app-server refused the second with

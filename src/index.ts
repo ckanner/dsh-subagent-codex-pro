@@ -35,7 +35,7 @@
  * @module dsh-subagent-codex-pro
  */
 
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -121,6 +121,50 @@ export interface Config {
    * Codex CLI and still resumable.
    */
   originator?: string
+}
+
+/** The slice of the harness's attachment store this plugin needs. */
+interface AttachmentStoreLike {
+  saveImages(images: readonly { readonly data: Buffer; readonly mediaType: string }[]): Promise<readonly unknown[]>
+}
+
+/** The slice of the harness's LLM service this plugin needs. */
+interface LlmServiceLike {
+  resolveModelInfo(
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<{ readonly inputModalities?: readonly string[] }>
+}
+
+/** Media types this plugin hands the attachment store, by file extension. */
+const IMAGE_MEDIA_TYPES: Readonly<Record<string, string>> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+}
+
+/** A cap on one image, so a stray large file cannot stall a delegation. */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+/** One content block the model can receive. */
+interface ContentBlockLike {
+  readonly type: string
+  readonly text?: string
+  readonly attachment?: unknown
+}
+
+/** Stable text for an image the model could not be handed. */
+function imageNote(reason: string): string {
+  return `[image not delivered: ${reason}]`
+}
+
+/** The media type for a path, when its extension names one this store admits. */
+function mediaTypeOf(path: string): string | undefined {
+  const dot = path.lastIndexOf('.')
+  return dot < 0 ? undefined : IMAGE_MEDIA_TYPES[path.slice(dot).toLowerCase()]
 }
 
 /** The effort values Codex accepts; used only for diagnostics. */
@@ -284,6 +328,94 @@ export function apply(ctx: Context, config: Config = {}): void {
     // works, it just runs in the foreground and says nothing about it.
     const jobs = ctx.get('jobs') as JobsServiceLike | undefined
 
+    /** Whether the calling Agent's model route admits images at all. */
+    const modelTakesImages = async (): Promise<boolean> => {
+      const llm = ctx.get('llm') as LlmServiceLike | undefined
+      const routed = (agent.session as { requestHeader?(): { config?: { provider?: string, model?: string } } })
+        .requestHeader?.()?.config
+      const provider = routed?.provider
+      const model = routed?.model
+      if (llm === undefined || provider === undefined || model === undefined) return false
+      try {
+        const info = await llm.resolveModelInfo(provider, model)
+        return info.inputModalities !== undefined && info.inputModalities.includes('image')
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * Turn one finished delegation into the blocks the model receives.
+     *
+     * A run's images are read here, because the app-server reports them as paths
+     * on this host rather than as bytes, and handed to the attachment store so
+     * the model gets an image instead of a description of one. Nothing here can
+     * fail the delegation: a store that is absent, a route that cannot take
+     * images, and a file that cannot be read all become a text note, because the
+     * answer the delegation produced matters more than the picture beside it.
+     *
+     * @param outcome - the finished run.
+     * @param mode - the thread mode the run used.
+     * @returns the text, the thread id, and any content blocks to deliver.
+     */
+    const deliverResult = async (
+      outcome: { readonly text: string; readonly threadId: string | undefined,
+        readonly images?: readonly { readonly path?: string, readonly data?: string, readonly mimeType?: string }[] | undefined },
+      mode: 'ephemeral' | 'persistent',
+    ): Promise<{
+      readonly text: string
+      readonly threadId: string | undefined
+      readonly blocks?: readonly ContentBlockLike[] | undefined
+    }> => {
+      const text = withThreadMarker(outcome, mode)
+      const images = outcome.images ?? []
+      if (images.length === 0) return { text, threadId: outcome.threadId }
+
+      const notes: string[] = []
+      const notesFor = (reason: string): void => { notes.push(imageNote(reason)) }
+
+      const store = ctx.get('attachments') as AttachmentStoreLike | undefined
+      if (store === undefined) {
+        for (let i = 0; i < images.length; i += 1) notesFor('no attachment store is mounted')
+        return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
+      }
+      if (!await modelTakesImages()) {
+        for (let i = 0; i < images.length; i += 1) notesFor('this model route does not accept images')
+        return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
+      }
+
+      const payloads: { data: Buffer, mediaType: string }[] = []
+      for (const image of images) {
+        try {
+          if (image.data !== undefined) {
+            payloads.push({ data: Buffer.from(image.data, 'base64'), mediaType: image.mimeType ?? 'image/png' })
+            continue
+          }
+          if (image.path === undefined) { notesFor('the image had neither a path nor data'); continue }
+          const mediaType = mediaTypeOf(image.path)
+          if (mediaType === undefined) { notesFor(`unsupported image type: ${image.path}`); continue }
+          const stat = statSync(image.path)
+          if (stat.size > MAX_IMAGE_BYTES) { notesFor(`larger than ${String(MAX_IMAGE_BYTES)} bytes: ${image.path}`); continue }
+          payloads.push({ data: readFileSync(image.path), mediaType })
+        } catch (error: unknown) {
+          notesFor(`could not read ${image.path ?? 'the image'}: ${String(error)}`.slice(0, 200))
+        }
+      }
+
+      if (payloads.length === 0) {
+        return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
+      }
+      try {
+        const refs = await store.saveImages(payloads)
+        const blocks: ContentBlockLike[] = [{ type: 'text', text }, ...refs.map((ref) => ({ type: 'image', attachment: ref }))]
+        diag(`deliver: ${String(refs.length)} image(s) attached to the delegation result`)
+        return { text, threadId: outcome.threadId, blocks }
+      } catch (error: unknown) {
+        notesFor(`the attachment store refused them: ${String(error)}`.slice(0, 200))
+        return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
+      }
+    }
+
     /**
      * The durable thread this Agent session is reusing, for `threadMode: session`.
      *
@@ -318,7 +450,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       call: CallLike,
       signal: AbortSignal,
       onProgress?: (text: string) => void,
-    ): Promise<{ readonly text: string; readonly threadId: string | undefined }> => {
+    ): Promise<{
+      readonly text: string
+      readonly threadId: string | undefined
+      readonly blocks?: readonly ContentBlockLike[] | undefined
+    }> => {
       // An explicit thread id wins; then an explicit mode; then the session's
       // remembered thread; then the configured default.
       const configured = resolved.threadMode
@@ -364,8 +500,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (mode === 'persistent' && outcome.threadId !== undefined) {
           sessionThread.set(String(agent.id), outcome.threadId)
         }
-        diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'}`)
-        return { text: withThreadMarker(outcome, mode), threadId: outcome.threadId }
+        diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'} `
+          + `images=${String(outcome.images?.length ?? 0)}`)
+        return await deliverResult(outcome, mode)
       } catch (error: unknown) {
         // A session's remembered thread can be gone — the user removed it, or the
         // Codex state moved. That is this plugin's own bookkeeping, so a fresh
@@ -399,8 +536,9 @@ export function apply(ctx: Context, config: Config = {}): void {
             onProgress,
           })
           if (outcome.threadId !== undefined) sessionThread.set(String(agent.id), outcome.threadId)
-          diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'}`)
-          return { text: withThreadMarker(outcome, mode), threadId: outcome.threadId }
+          diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'} `
+            + `images=${String(outcome.images?.length ?? 0)}`)
+          return await deliverResult(outcome, mode)
         }
         throw error
       } finally {

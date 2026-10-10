@@ -129,7 +129,7 @@ test('the tool forwards the call\'s model and effort to the runner', async () =>
     { description: 'probe', prompt: 'say hi', model: 'gpt-6-astra', reasoning_effort: 'xhigh' },
     { signal: new AbortController().signal },
   )
-  assert.equal(result, 'DONE')
+  assert.deepEqual(result, { content: [{ type: 'text', text: 'DONE' }] })
   const pick = (r: { prompt: string; model?: string; reasoningEffort?: string }) =>
     ({ prompt: r.prompt, model: r.model, reasoningEffort: r.reasoningEffort })
   assert.deepEqual(pick(seen[0]!), { prompt: 'say hi', model: 'gpt-6-astra', reasoningEffort: 'xhigh' })
@@ -163,7 +163,10 @@ test('run_in_background appears only when the jobs service is present', async ()
   // Without background support the output is a plain answer, so the schema stays simple.
   const off = createCodexTool({ ...base, backgroundEnabled: false })
   const on = createCodexTool({ ...base, backgroundEnabled: true })
-  assert.deepEqual(off.output.schema, { type: 'string' })
+  const foregroundSchema = off.output.schema as { properties?: { content?: { type?: string } } }
+  // A foreground answer is content blocks, so an image a run produced can be
+  // delivered as an image rather than as a description of one.
+  assert.equal(foregroundSchema.properties?.content?.type, 'array')
   assert.ok(Array.isArray((on.output.schema as { oneOf?: unknown[] }).oneOf))
 })
 
@@ -198,7 +201,7 @@ test('a background call returns its job id and never calls the foreground runner
     { description: 'quick', prompt: 'do it now' },
     { signal: new AbortController().signal },
   )
-  assert.equal(foreground, 'foreground')
+  assert.deepEqual(foreground, { content: [{ type: 'text', text: 'foreground' }] })
   assert.deepEqual(ran, ['do it now'])
 })
 
@@ -265,4 +268,56 @@ test('the tool describes the thread default it was configured with', async () =>
   assert.match(described('session'), /`session` by default/)
   assert.match(described('persistent'), /`persistent` by default/)
   assert.match(described('session'), /thread_id/)
+})
+
+test('image blocks from the runner reach the tool result and its rendering', async () => {
+  const { createCodexTool } = await import('../src/tool.ts')
+  const tool = createCodexTool({
+    cwd: '/w',
+    modelSelectionEnabled: false,
+    backgroundEnabled: false,
+    defaultThreadMode: 'ephemeral',
+    threadControlEnabled: false,
+    // A runner that reports a thread and one delivered image, the shape
+    // index.ts produces once the attachment store has taken the bytes.
+    run: async () => ({
+      text: 'shot taken',
+      threadId: 'thread-1',
+      blocks: [
+        { type: 'text', text: 'shot taken' },
+        { type: 'image', attachment: 'att-1' },
+      ],
+    }),
+  })
+  const result = await tool.execute(
+    { description: 'shot', prompt: 'take one' },
+    { signal: new AbortController().signal },
+  ) as { content: { type: string, attachment?: unknown }[] }
+
+  assert.equal(result.content.length, 2)
+  assert.equal(result.content[1]?.type, 'image')
+  assert.equal(result.content[1]?.attachment, 'att-1')
+
+  // The model-facing text stays text, with the image counted rather than inlined.
+  const rendered = tool.output.render({}, result) as { type: string, text: string }[]
+  assert.equal(rendered[0]?.text, 'shot taken\n\n[1 image]')
+})
+
+test('a text-only runner still returns a content block the schema admits', async () => {
+  const { createCodexTool } = await import('../src/tool.ts')
+  const tool = createCodexTool({
+    cwd: '/w',
+    modelSelectionEnabled: false,
+    backgroundEnabled: false,
+    defaultThreadMode: 'ephemeral',
+    threadControlEnabled: false,
+    run: async () => ({ text: 'plain', threadId: undefined }),
+  })
+  const result = await tool.execute(
+    { description: 'p', prompt: 'go' },
+    { signal: new AbortController().signal },
+  )
+  assert.deepEqual(result, { content: [{ type: 'text', text: 'plain' }] })
+  const rendered = tool.output.render({}, result) as { text: string }[]
+  assert.equal(rendered[0]?.text, 'plain')
 })
