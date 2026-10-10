@@ -1,6 +1,26 @@
 # Changelog
 
+## 0.4.0
+
+A delegation can run in a directory of its own.
+
+`cwd` names an absolute path the run should use instead of the session's working directory — the shape a
+post-deploy smoke test needs, where the run may write its artifacts but the repository must stay clean.
+
+The path must be absolute, must exist, and must be a directory; anything else is refused with a message naming
+the problem, rather than a run that quietly happens somewhere unexpected. It is a working directory and not a
+sandbox boundary: what a run may touch remains the permission mode's decision.
+
+Naming a directory also starts a fresh Codex thread, because a thread belongs to the directory it was created
+in — continuing one elsewhere would be continuing a conversation about different files. `cwd` is therefore
+incompatible with `threadMode: session`'s reuse, and the log says which directory each run used.
+
+Requested while retiring a skill whose two jobs this plugin now covers: dispatching to Codex, and getting
+screenshots back — which the skill could not do, and which is why its instructions required artifacts to land on
+disk instead.
+
 ## 0.3.3
+
 
 A delegation now has a deadline, because one without it is invisible when it stalls.
 

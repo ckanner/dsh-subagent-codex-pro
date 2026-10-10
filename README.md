@@ -136,6 +136,26 @@ A verified end-to-end run: 30 s wall clock, the model's `PROBE_OK` returned as
 the tool result. A real app-server run is also covered by the live test, which
 opens a thread with `reasoningEffort` and a turn with `effort`.
 
+## Choosing the directory
+
+A delegation runs in the session's working directory by default. `cwd` names another one:
+
+```js
+tools.subagent_codex({
+  description: "Post-deploy UI smoke",
+  prompt: "…",
+  cwd: "/tmp/mesh-smoke/20261010-0800",
+})
+```
+
+The path must be absolute, must exist, and must be a directory; anything else is refused with a message naming
+the problem rather than a run that quietly happens somewhere unexpected. It is a working directory, not a
+sandbox boundary — what a run may touch is the permission mode's decision.
+
+Naming a directory also starts a fresh Codex thread, because a thread belongs to the directory it was created
+in: continuing one somewhere else would be continuing a conversation about different files. So `cwd` and
+`threadMode: session`'s reuse do not combine, and the log says which directory a run used.
+
 ## Images
 
 Codex can look at pictures and can take screenshots; this tool can now hand those pictures back.

@@ -29,6 +29,8 @@ export interface CodexCall {
   readonly threadMode?: 'ephemeral' | 'persistent'
   /** Continue this thread instead of creating one. */
   readonly threadId?: string
+  /** Working directory for the delegation, when the call named one. */
+  readonly cwd?: string
 }
 
 /** Everything the tool needs that does not change per call. */
@@ -123,6 +125,13 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         prompt: {
           type: 'string',
           description: 'The complete task for Codex, including everything it needs and cannot ask for.',
+        },
+        cwd: {
+          type: 'string',
+          description: 'Absolute path to run the delegation in. Defaults to this session\'s working'
+            + ' directory. Use it when the work belongs somewhere else — a scratch directory the run may'
+            + ' write into, for instance. The path must exist and be a directory. Naming one starts a fresh'
+            + ' Codex thread, because a thread belongs to the directory it was created in.',
         },
         ...options.modelSelectionEnabled
           ? {
@@ -232,6 +241,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
       const label = typeof request.description === 'string' && request.description !== ''
         ? request.description
         : 'Codex delegation'
+      const cwd = typeof request.cwd === 'string' && request.cwd !== '' ? request.cwd : undefined
       const threadMode = request.thread_mode === 'ephemeral' || request.thread_mode === 'persistent'
         ? request.thread_mode
         : undefined
@@ -245,6 +255,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         ...(threadMode === undefined ? {} : { threadMode }),
         ...(threadId === undefined ? {} : { threadId }),
+        ...(cwd === undefined ? {} : { cwd }),
       }
       if (options.backgroundEnabled && request.run_in_background === true) {
         return { kind: 'background' as const, jobId: options.startBackground(call) }

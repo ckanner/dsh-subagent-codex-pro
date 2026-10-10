@@ -132,6 +132,25 @@ export interface Config {
   originator?: string
 }
 
+/**
+ * Check a caller-named working directory's shape.
+ *
+ * Only the shape is checked — absolute and non-empty — so the rule is testable
+ * without a filesystem. Whether the path exists and is a directory is checked
+ * where the run is prepared, because that is where a real path matters.
+ *
+ * @param requested - the path a call named.
+ * @returns the path, unchanged.
+ * @throws when it is not an absolute path.
+ */
+export function checkedWorkdir(requested: string): string {
+  if (requested.trim() === '') throw new Error('subagent_codex: cwd must not be empty')
+  if (!requested.startsWith('/')) {
+    throw new Error(`subagent_codex: cwd must be an absolute path, got "${requested}"`)
+  }
+  return requested
+}
+
 /** The slice of the harness's attachment store this plugin needs. */
 interface AttachmentStoreLike {
   saveImages(images: readonly { readonly data: Buffer; readonly mediaType: string }[]): Promise<readonly unknown[]>
@@ -533,6 +552,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       readonly reasoningEffort?: string
       readonly threadMode?: 'ephemeral' | 'persistent'
       readonly threadId?: string
+      readonly cwd?: string
     }
 
     /** Run one call over the app-server protocol. */
@@ -545,6 +565,21 @@ export function apply(ctx: Context, config: Config = {}): void {
       readonly threadId: string | undefined
       readonly blocks?: readonly ContentBlockLike[] | undefined
     }> => {
+      // A delegation may name its own working directory; the session's is the
+      // default. The path is a working directory, not a sandbox boundary: what a
+      // run may touch is the permission mode's decision, not this one's.
+      let runCwd = cwd
+      if (call.cwd !== undefined) {
+        runCwd = checkedWorkdir(call.cwd)
+        let stat
+        try {
+          stat = statSync(runCwd)
+        } catch {
+          throw new Error(`subagent_codex: cwd does not exist: ${runCwd}`)
+        }
+        if (!stat.isDirectory()) throw new Error(`subagent_codex: cwd is not a directory: ${runCwd}`)
+      }
+
       // An explicit thread id wins; then an explicit mode; then the session's
       // remembered thread; then the configured default.
       const configured = resolved.threadMode
@@ -554,9 +589,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       const choice = chooseThread({
         explicit,
         configured,
-        // A remembered thread is only reusable for a durable call; an ephemeral
-        // one was never remembered in the first place.
-        remembered: mode === 'persistent' ? remembered : undefined,
+        // A remembered thread is only reusable for a durable call, and only in
+        // the directory it was created in: a Codex thread belongs to its own
+        // working directory, so a call that names another one starts fresh.
+        remembered: mode === 'persistent' && call.cwd === undefined ? remembered : undefined,
         inFlight,
       })
       const reuse = choice.reuse
@@ -566,14 +602,15 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       diag(`run: model=${call.model ?? '<default>'} effort=${call.reasoningEffort ?? '<default>'} `
         + `thread=${mode}${reuse === undefined ? '' : ` resume=${reuse}`} `
-        + `cwd=${cwd} prompt=${String(call.prompt.length)}B via=app-server`)
+        + `cwd=${runCwd}${call.cwd === undefined ? '' : ' (call-named)'} `
+        + `prompt=${String(call.prompt.length)}B via=app-server`)
       // Claim the thread for the whole call, so a concurrent delegation sees it
       // as busy before it tries rather than failing when it does.
       if (reuse !== undefined) inFlight.add(reuse)
       try {
         const outcome = await delegateOnce({
           prompt: call.prompt,
-          cwd,
+          cwd: runCwd,
           command: resolved.command,
           permissionMode: resolved.permissionMode,
           model: call.model,
@@ -613,7 +650,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           sessionThread.delete(String(agent.id))
           const outcome = await delegateOnce({
             prompt: call.prompt,
-            cwd,
+            cwd: runCwd,
             command: resolved.command,
             permissionMode: resolved.permissionMode,
             model: call.model,

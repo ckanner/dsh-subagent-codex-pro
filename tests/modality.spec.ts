@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-const { routeRefusesImages, withImageNote } = await import('../src/index.ts')
+const { routeRefusesImages, withImageNote, checkedWorkdir } = await import('../src/index.ts')
 
 test('the default route declares image input and is not refused', () => {
   assert.equal(routeRefusesImages({ inputModalities: ['text', 'image'] }), false)
@@ -47,4 +47,12 @@ test('an image with no host path is still counted', () => {
   // An MCP screenshot arrives as bytes, so there is no path to name.
   assert.equal(withImageNote('answer', [{ data: 'AAAA' }]), 'answer\n\n[1 image]')
   assert.equal(withImageNote('answer', []), 'answer')
+})
+
+test('a caller-named working directory must be absolute', () => {
+  assert.equal(checkedWorkdir('/tmp/smoke'), '/tmp/smoke')
+  assert.throws(() => checkedWorkdir('smoke'), /absolute path/)
+  assert.throws(() => checkedWorkdir('./smoke'), /absolute path/)
+  assert.throws(() => checkedWorkdir('~/smoke'), /absolute path/)
+  assert.throws(() => checkedWorkdir('   '), /must not be empty/)
 })
