@@ -38,6 +38,11 @@ export interface SubagentStartRequestLike {
   readonly parent: AgentLike
   readonly signal: AbortSignal
   readonly agentOptions?: AgentOptionsLike
+  /**
+   * A JSON Schema the child's answer must conform to, when the tool row carries
+   * one and this provider declared the capability for it.
+   */
+  readonly outputSchema?: Record<string, unknown>
 }
 
 /** What a finished run reports. */

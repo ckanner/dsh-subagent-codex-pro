@@ -556,6 +556,7 @@ export class CodexAppServerWire {
     signal?: AbortSignal,
     effort?: string,
     images: readonly string[] = [],
+    outputSchema?: Record0,
   ): Promise<WireRunResult> {
     const completion = Promise.withResolvers<TurnCompletion>()
     this.#turnCompleted = completion
@@ -575,6 +576,10 @@ export class CodexAppServerWire {
             // ── this package's addition ──────────────────────────────────────
             // The per-turn thinking level. The official adapter never sends it.
             ...effort === undefined ? {} : { effort },
+            // `outputSchema` belongs on the turn: the same field on thread/start
+            // is accepted and then silently ignored, measured — the answer came
+            // back as prose.
+            ...outputSchema === undefined ? {} : { outputSchema },
           }, { signal }), signal),
           'turn/start response',
         ).turn,

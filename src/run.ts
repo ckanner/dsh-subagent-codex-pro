@@ -65,6 +65,14 @@ export interface CodexRunSpec {
    */
   readonly images?: readonly string[] | undefined
   /**
+   * A JSON Schema for the final answer.
+   *
+   * The app-server enforces it, so the answer arrives as JSON that conforms
+   * instead of prose a caller has to parse and hope about. Sent on the turn: the
+   * same field on `thread/start` is accepted and ignored.
+   */
+  readonly outputSchema?: Record<string, unknown> | undefined
+  /**
    * A name for a persistent thread, shown in the Codex application's thread list.
    *
    * Ignored for `ephemeral`: a thread that leaves nothing behind has no list to
@@ -374,7 +382,7 @@ export async function startCodexRun(
   const settle = async (): Promise<CodexRunOutcome> => {
     try {
       const terminal = await Promise.race([
-        wire.runTurn(texts, runAbort.signal, spec.effort, spec.images ?? []),
+        wire.runTurn(texts, runAbort.signal, spec.effort, spec.images ?? [], spec.outputSchema),
         processFailure,
       ])
       if (terminal.stopReason === 'completed') {
@@ -521,6 +529,8 @@ export async function delegateOnce(options: {
   readonly runTimeoutMs?: number | undefined
   /** Absolute paths of images to show Codex alongside the task. */
   readonly images?: readonly string[] | undefined
+  /** A JSON Schema the final answer must conform to. */
+  readonly outputSchema?: Record<string, unknown> | undefined
   readonly env?: Readonly<Record<string, string>> | undefined
   readonly signal: AbortSignal
   /** Called once the run is published, for diagnostics. */
@@ -548,6 +558,7 @@ export async function delegateOnce(options: {
         originator: options.originator,
         runTimeoutMs: options.runTimeoutMs,
         images: options.images,
+        outputSchema: options.outputSchema,
         threadName: options.threadName,      env: options.env,
       onProgress: options.onProgress,
     },

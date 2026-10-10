@@ -103,8 +103,8 @@ test('the tool exposes model and effort only while the host opts in', async () =
   const props = (tool: { parameters: Record<string, unknown> }): string[] =>
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
-  assert.deepEqual(props(off), ['description', 'prompt', 'images', 'cwd'])
-  assert.deepEqual(props(on), ['description', 'prompt', 'images', 'cwd', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(off), ['description', 'prompt', 'output_schema', 'images', 'cwd'])
+  assert.deepEqual(props(on), ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
   // The harness rejects a descriptor map: `parameters` must be a JSON Schema object.
   for (const tool of [off, on]) {
     assert.equal((tool.parameters as { type?: string }).type, 'object')
@@ -156,9 +156,9 @@ test('run_in_background appears only when the jobs service is present', async ()
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
   assert.deepEqual(props(createCodexTool({ ...base, backgroundEnabled: false })),
-    ['description', 'prompt', 'images', 'cwd', 'model', 'reasoning_effort'])
+    ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
   assert.deepEqual(props(createCodexTool({ ...base, backgroundEnabled: true })),
-    ['description', 'prompt', 'images', 'cwd', 'model', 'reasoning_effort', 'run_in_background'])
+    ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort', 'run_in_background'])
 
   // Without background support the output is a plain answer, so the schema stays simple.
   const off = createCodexTool({ ...base, backgroundEnabled: false })
@@ -235,8 +235,8 @@ test('the tool declares and forwards the thread controls when enabled', async ()
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
   // disabled: the schema is exactly what it was before this feature existed
-  assert.deepEqual(props(make(false)), ['description', 'prompt', 'images', 'cwd', 'model', 'reasoning_effort'])
-  assert.deepEqual(props(make(true)), ['description', 'prompt', 'images', 'cwd', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
+  assert.deepEqual(props(make(false)), ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(make(true)), ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
 
   const tool = make(true)
   await tool.execute(
@@ -375,4 +375,28 @@ test('the tool forwards image paths, and omits the field when none are named', a
   const properties = (tool.parameters as { properties: Record<string, unknown> }).properties
   assert.ok('images' in properties, 'images must be declared, or the model cannot pass it')
   assert.equal((properties.images as { type?: string }).type, 'array')
+})
+
+test('the tool forwards an output schema and omits the field when none is named', async () => {
+  const { createCodexTool } = await import('../src/tool.ts')
+  const seen: (Record<string, unknown> | undefined)[] = []
+  const tool = createCodexTool({
+    cwd: '/w',
+    modelSelectionEnabled: false,
+    backgroundEnabled: false,
+    defaultThreadMode: 'ephemeral',
+    threadControlEnabled: false,
+    run: async (request) => {
+      seen.push(request.outputSchema)
+      return { text: '{"verdict":"pass"}', threadId: undefined }
+    },
+  })
+  const signal = new AbortController().signal
+  const schema = { type: 'object', properties: { verdict: { type: 'string' } } }
+  await tool.execute({ description: 'x', prompt: 'go' }, { signal })
+  await tool.execute({ description: 'x', prompt: 'go', output_schema: schema }, { signal })
+  assert.deepEqual(seen, [undefined, schema])
+
+  const properties = (tool.parameters as { properties: Record<string, unknown> }).properties
+  assert.deepEqual((properties.output_schema as { type?: string }).type, 'object')
 })

@@ -1,6 +1,28 @@
 # Changelog
 
+## 0.6.0
+
+The answer can now be made machine-readable, and the capability table stops understating what this provider can
+do.
+
+`output_schema` hands Codex a JSON Schema its final answer must conform to, so a later step reads the answer
+instead of parsing prose and hoping. The schema must be object-rooted, the same rule the harness applies to a
+schema it passes a provider. The app-server enforces it: a measured run returned
+`{"verdict":"pass","reason":"…","count":2}` with no extra keys and every required one present. The answer still
+arrives as text, and that text is JSON.
+
+It is sent on the **turn**: the same field on `thread/start` is accepted and then silently ignored — measured
+both ways, and the thread-level form produced prose. Another silent-ignore, like a missing `localImage` path.
+
+`capabilities.outputSchema` is now `true` rather than `false`, because it is now honored: a schema the harness
+puts on a `tool-subagent` row reaches Codex, and the answer is parsed so the caller receives `structured`
+alongside the text. Declaring it while ignoring it would have been worse than the old `false`.
+
+The `apply` diagnostic line now names the version, so a restart's log says which build is loaded. It previously
+could not tell two releases apart: 0.3.3 and 0.4.0 logged identically.
+
 ## 0.5.0
+
 
 Pictures now travel both ways. `images` hands Codex pictures alongside the task:
 

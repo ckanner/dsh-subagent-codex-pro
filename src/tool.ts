@@ -33,6 +33,8 @@ export interface CodexCall {
   readonly cwd?: string
   /** Absolute paths of images to show Codex alongside the task. */
   readonly images?: readonly string[]
+  /** A JSON Schema the final answer must conform to. */
+  readonly outputSchema?: Record<string, unknown>
 }
 
 /** Everything the tool needs that does not change per call. */
@@ -127,6 +129,13 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         prompt: {
           type: 'string',
           description: 'The complete task for Codex, including everything it needs and cannot ask for.',
+        },
+        output_schema: {
+          type: 'object',
+          description: 'A JSON Schema (object-rooted) the final answer must conform to. Codex enforces it,'
+            + ' so the result is JSON that conforms rather than prose to parse and hope about — use it'
+            + ' whenever a later step reads the answer mechanically, such as a verdict or a list of'
+            + ' failures. The answer still arrives as text; it is JSON text.',
         },
         images: {
           type: 'array',
@@ -252,6 +261,10 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ? request.description
         : 'Codex delegation'
       const cwd = typeof request.cwd === 'string' && request.cwd !== '' ? request.cwd : undefined
+      const outputSchema = typeof request.output_schema === 'object' && request.output_schema !== null
+        && !Array.isArray(request.output_schema)
+        ? request.output_schema as Record<string, unknown>
+        : undefined
       const images = Array.isArray(request.images)
         ? request.images.filter((value): value is string => typeof value === 'string' && value !== '')
         : undefined
@@ -270,6 +283,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ...(threadId === undefined ? {} : { threadId }),
         ...(cwd === undefined ? {} : { cwd }),
         ...(images === undefined || images.length === 0 ? {} : { images }),
+        ...(outputSchema === undefined ? {} : { outputSchema }),
       }
       if (options.backgroundEnabled && request.run_in_background === true) {
         return { kind: 'background' as const, jobId: options.startBackground(call) }

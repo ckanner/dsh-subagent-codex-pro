@@ -102,6 +102,29 @@ run done: text=8B
 
 一次已验证的端到端运行：30 秒墙钟时间，模型的 `PROBE_OK` 作为工具结果返回。真实 app-server 运行也由 live 测试覆盖 —— 它开一个带 `reasoningEffort` 的 thread，以及一个带 `effort` 的 turn。
 
+## 让答案可被机器读取
+
+`output_schema` 把一份 JSON Schema 交给 Codex，它的最终答复**必须**符合该 schema —— 于是后续步骤可以**直接读取**答案，而不必解析正文然后祈祷：
+
+```js
+tools.subagent_codex({
+  description: "冒烟判定",
+  prompt: "判断两个端点是否都返回了 200。",
+  output_schema: {
+    type: "object",
+    properties: { verdict: { type: "string", enum: ["pass", "fail"] }, count: { type: "number" } },
+    required: ["verdict", "count"],
+    additionalProperties: false,
+  },
+})
+```
+
+schema 必须**以 object 为根** —— 这与 harness 对"它递给 provider 的 schema"所施加的规则一致 —— 因为 Codex 约束的是**整个答复**，而一个裸标量没有地方安放这个形状。app-server 会**强制执行**：实测一次运行返回 `{"verdict":"pass","reason":"…","count":2}`，**没有多余键、必填项齐全**。答复仍以**文本**形式到达，而那段文本就是 JSON。
+
+它放在 **turn** 上、不是 thread 上：同样的字段放在 `thread/start` 上会被**接受然后静默忽略** —— 答复变回散文（两种都实测过）。
+
+由 harness 驱动的 provider（`thread-subagent` 那条路）也能通过它的行配置拿到 schema；本插件现在**声明了这项能力**，并把答复解析出来，使调用方除了文本还能拿到 `structured`。
+
 ## 让 Codex 看图
 
 `images` 把图片和任务一起交给 Codex —— 它**收到的是图**，而不是被告知"自己去打开某个文件"：
@@ -210,6 +233,7 @@ tools.subagent_codex({ description: "…", prompt: "…", run_in_background: tru
 | 返回最终消息 | ✅ |
 | 本次运行产生的图片（截图、看过的文件） | ✅ 当调用方的模型路由接受图片时 |
 | 交给本次运行的图片（`images`，绝对路径） | ✅ |
+| schema 强约束的答案（`output_schema`，或 harness 的行配置） | ✅ |
 | `run_in_background` + 通过 `job_output` 看进度 | ✅ |
 | app-server 协议（握手、线程生命周期、批准决定） | ✅ |
 | 交互式批准 | 按设计没有 —— 委派运行是无人值守的，和官方 provider 一样 |

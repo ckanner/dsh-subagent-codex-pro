@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-const { routeRefusesImages, withImageNote, checkedWorkdir, checkedImagePath } = await import('../src/index.ts')
+const { routeRefusesImages, withImageNote, checkedWorkdir, checkedImagePath, checkedOutputSchema } = await import('../src/index.ts')
 
 test('the default route declares image input and is not refused', () => {
   assert.equal(routeRefusesImages({ inputModalities: ['text', 'image'] }), false)
@@ -62,4 +62,16 @@ test('a caller-named image path must be absolute', () => {
   assert.throws(() => checkedImagePath('shot.png'), /must be absolute/)
   assert.throws(() => checkedImagePath('./shot.png'), /must be absolute/)
   assert.throws(() => checkedImagePath('  '), /must not be empty/)
+})
+
+test('an output schema must be an object-rooted JSON Schema', () => {
+  const schema = { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'] }
+  assert.deepEqual(checkedOutputSchema(schema), schema)
+  // Codex constrains a whole answer, so a bare scalar or array has nowhere to
+  // put the shape; the harness applies the same rule to a schema it passes on.
+  assert.throws(() => checkedOutputSchema({ type: 'array' }), /"type": "object"/)
+  assert.throws(() => checkedOutputSchema({}), /"type": "object"/)
+  assert.throws(() => checkedOutputSchema(['nope']), /must be a JSON Schema object/)
+  assert.throws(() => checkedOutputSchema('nope'), /must be a JSON Schema object/)
+  assert.throws(() => checkedOutputSchema(null), /must be a JSON Schema object/)
 })

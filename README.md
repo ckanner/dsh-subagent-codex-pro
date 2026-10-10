@@ -136,6 +136,35 @@ A verified end-to-end run: 30 s wall clock, the model's `PROBE_OK` returned as
 the tool result. A real app-server run is also covered by the live test, which
 opens a thread with `reasoningEffort` and a turn with `effort`.
 
+## Making the answer machine-readable
+
+`output_schema` hands Codex a JSON Schema its final answer must conform to, so a later step can read the
+answer instead of parsing prose and hoping:
+
+```js
+tools.subagent_codex({
+  description: "Smoke verdict",
+  prompt: "Assess whether both endpoints returned 200.",
+  output_schema: {
+    type: "object",
+    properties: { verdict: { type: "string", enum: ["pass", "fail"] }, count: { type: "number" } },
+    required: ["verdict", "count"],
+    additionalProperties: false,
+  },
+})
+```
+
+The schema must be object-rooted — the same rule the harness applies to a schema it passes a provider — because
+Codex constrains a whole answer and a bare scalar has nowhere to put the shape. The app-server **enforces** it:
+a measured run came back as `{"verdict":"pass","reason":"…","count":2}`, with no extra keys and every required
+one present. The answer arrives as **text**, and that text is JSON.
+
+It is sent on the turn, not the thread: the same field on `thread/start` is accepted and silently ignored — the
+answer came back as prose. Measured both ways.
+
+A provider the harness drives (`thread-subagent`) can also be given a schema by its row, and this plugin now
+declares that capability and parses the answer so the caller receives `structured` as well as the text.
+
 ## Showing Codex a picture
 
 `images` hands Codex pictures alongside the task, so it receives them as pictures instead of being told to go
@@ -305,6 +334,7 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 | final message returned | ✅ |
 | images the run produced (screenshots, viewed files) | ✅ when the calling model route accepts images |
 | images handed to the run (`images`, absolute paths) | ✅ |
+| schema-enforced answer (`output_schema`, or the harness's row setting) | ✅ |
 | `run_in_background` + progress via `job_output` | ✅ |
 | app-server protocol (handshake, thread lifecycle, approval decisions) | ✅ |
 | interactive approvals | by design none — a delegated run is unattended, as the official provider is |

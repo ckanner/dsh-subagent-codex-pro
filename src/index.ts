@@ -36,6 +36,7 @@
  */
 
 import { appendFileSync, readFileSync, statSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -130,6 +131,30 @@ export interface Config {
    * Codex CLI and still resumable.
    */
   originator?: string
+}
+
+/**
+ * Check a caller-named output schema's shape.
+ *
+ * The harness applies the same rule to a schema it passes a provider —
+ * `assertObjectJsonSchema` — so matching it means a schema this tool accepts is
+ * one the harness would too. Only the root is checked: it must be an object with
+ * `type: "object"`, because Codex constrains a whole answer and a bare array or
+ * scalar has nowhere to put the shape.
+ *
+ * @param value - the schema a call named.
+ * @returns the schema, unchanged.
+ * @throws when it is not an object-rooted JSON Schema.
+ */
+export function checkedOutputSchema(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('subagent_codex: output_schema must be a JSON Schema object')
+  }
+  const schema = value as Record<string, unknown>
+  if (schema.type !== 'object') {
+    throw new Error('subagent_codex: output_schema must have "type": "object" at its root')
+  }
+  return schema
 }
 
 /**
@@ -262,6 +287,38 @@ function mediaTypeOf(path: string): string | undefined {
   return dot < 0 ? undefined : IMAGE_MEDIA_TYPES[path.slice(dot).toLowerCase()]
 }
 
+/**
+ * The parsed answer of a run that was asked for a schema.
+ *
+ * Best effort by design: the app-server enforces the schema, so a reply that
+ * still does not parse is the unexpected case, and dropping the text because of
+ * it would throw away the only thing the delegation produced.
+ *
+ * @param outcome - the finished run.
+ * @returns `structured` when the answer parsed, otherwise nothing.
+ */
+function structuredOf(outcome: { readonly output: readonly { readonly type: 'text', readonly text: string }[] }):
+{ readonly structured?: unknown } {
+  const text = outcome.output.map((block) => block.text).join('\n\n').trim()
+  if (text === '') return {}
+  try {
+    return { structured: JSON.parse(text) as unknown }
+  } catch {
+    return {}
+  }
+}
+
+/** This package's own version, read once for the diagnostic line. */
+const PLUGIN_VERSION: string = (() => {
+  try {
+    const require_ = createRequire(import.meta.url)
+    const pkg = require_('../package.json') as { version?: string }
+    return pkg.version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
+
 /** The effort values Codex accepts; used only for diagnostics. */
 const KNOWN_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const
 
@@ -306,7 +363,7 @@ class CodexExecProvider implements SubagentProviderLike {
    */
   readonly capabilities = {
     agentOptions: true,
-    outputSchema: false,
+    outputSchema: true,
     depthLimit: false,
     toolFilter: false,
     persona: false,
@@ -350,6 +407,9 @@ class CodexExecProvider implements SubagentProviderLike {
       reasoningEffort: effort,
       effort,
       runTimeoutMs: this.resolved.runTimeoutMs,
+      ...(request.outputSchema === undefined
+        ? {}
+        : { outputSchema: request.outputSchema as Record<string, unknown> }),
       env: this.resolved.env,
     }
     diag(`provider start: model=${model ?? '<default>'} effort=${effort ?? '<default>'} cwd=${cwd} via=app-server`)
@@ -363,6 +423,10 @@ class CodexExecProvider implements SubagentProviderLike {
         // The harness's own vocabulary has no `timeout`; its `aborted` is what a
         // cancelled run is, and the diagnostic carries the reason either way.
         stopReason: outcome.stopReason === 'timeout' ? 'aborted' : outcome.stopReason,
+        // A schema was asked for, so the answer is JSON; parse it for the caller
+        // that wanted structure rather than text to parse. Best effort: a reply
+        // that does not parse keeps its text and reports no structure.
+        ...(request.outputSchema === undefined ? {} : structuredOf(outcome)),
         ...(outcome.diagnostic === undefined ? {} : { diagnostic: outcome.diagnostic }),
       })),
       dispose: () => run.teardown(),
@@ -393,7 +457,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   try {
     ctx.subagents.registerProvider(new CodexExecProvider(resolved))
-    diag(`apply: provider "${resolved.providerName}" registered with agentOptions: true `
+    diag(`apply: v${PLUGIN_VERSION} provider "${resolved.providerName}" registered with agentOptions: true `
       + `(efforts: ${KNOWN_EFFORTS.join('/')}, permission=${resolved.permissionMode}); `
       + `threadMode=${resolved.threadMode} originator=${JSON.stringify(resolved.originator)} `
       + `timeout=${String(resolved.runTimeoutMs)}ms; `
@@ -573,6 +637,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       readonly threadId?: string
       readonly cwd?: string
       readonly images?: readonly string[]
+      readonly outputSchema?: Record<string, unknown>
     }
 
     /** Run one call over the app-server protocol. */
@@ -619,6 +684,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
       }
 
+      const runSchema = call.outputSchema === undefined
+        ? undefined
+        : checkedOutputSchema(call.outputSchema)
+
       // An explicit thread id wins; then an explicit mode; then the session's
       // remembered thread; then the configured default.
       const configured = resolved.threadMode
@@ -642,7 +711,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       diag(`run: model=${call.model ?? '<default>'} effort=${call.reasoningEffort ?? '<default>'} `
         + `thread=${mode}${reuse === undefined ? '' : ` resume=${reuse}`} `
         + `cwd=${runCwd}${call.cwd === undefined ? '' : ' (call-named)'} `
-        + `images=${String(runImages?.length ?? 0)} prompt=${String(call.prompt.length)}B via=app-server`)
+        + `images=${String(runImages?.length ?? 0)} `
+        + `schema=${runSchema === undefined ? 'none' : 'yes'} prompt=${String(call.prompt.length)}B via=app-server`)
       // Claim the thread for the whole call, so a concurrent delegation sees it
       // as busy before it tries rather than failing when it does.
       if (reuse !== undefined) inFlight.add(reuse)
@@ -659,6 +729,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           originator: resolved.originator,
           runTimeoutMs: resolved.runTimeoutMs,
           images: runImages,
+          outputSchema: runSchema,
           threadName: threadNameFor(call.label),
           env: resolved.env,
           signal,
@@ -699,6 +770,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             originator: resolved.originator,
             runTimeoutMs: resolved.runTimeoutMs,
             images: runImages,
+            outputSchema: runSchema,
             threadName: threadNameFor(call.label),
             env: resolved.env,
             signal,
