@@ -134,6 +134,25 @@ export interface Config {
 }
 
 /**
+ * Check a caller-named deadline.
+ *
+ * A duration, so it must be a whole number of milliseconds: negative and
+ * fractional values have no meaning, and silently rounding one would give a
+ * caller a deadline it did not ask for. `0` is allowed and means no deadline,
+ * which is what the plugin's own configuration uses to disable it.
+ *
+ * @param value - the deadline a call named.
+ * @returns the deadline, unchanged.
+ * @throws when it is not a whole non-negative number of milliseconds.
+ */
+export function checkedTimeout(value: number): number {
+  if (!Number.isFinite(value)) throw new Error('subagent_codex: timeout_ms must be a finite number')
+  if (!Number.isInteger(value)) throw new Error('subagent_codex: timeout_ms must be whole milliseconds')
+  if (value < 0) throw new Error('subagent_codex: timeout_ms must not be negative')
+  return value
+}
+
+/**
  * Check a caller-named output schema's shape.
  *
  * The harness applies the same rule to a schema it passes a provider —
@@ -638,6 +657,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       readonly cwd?: string
       readonly images?: readonly string[]
       readonly outputSchema?: Record<string, unknown>
+      readonly timeoutMs?: number
     }
 
     /** Run one call over the app-server protocol. */
@@ -684,6 +704,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
       }
 
+      const runTimeout = call.timeoutMs === undefined ? undefined : checkedTimeout(call.timeoutMs)
       const runSchema = call.outputSchema === undefined
         ? undefined
         : checkedOutputSchema(call.outputSchema)
@@ -712,7 +733,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         + `thread=${mode}${reuse === undefined ? '' : ` resume=${reuse}`} `
         + `cwd=${runCwd}${call.cwd === undefined ? '' : ' (call-named)'} `
         + `images=${String(runImages?.length ?? 0)} `
-        + `schema=${runSchema === undefined ? 'none' : 'yes'} prompt=${String(call.prompt.length)}B via=app-server`)
+        + `schema=${runSchema === undefined ? 'none' : 'yes'} `
+        + `timeout=${String(runTimeout ?? resolved.runTimeoutMs)}ms`
+        + `${runTimeout === undefined ? '' : ' (call-named)'} `
+        + `prompt=${String(call.prompt.length)}B via=app-server`)
       // Claim the thread for the whole call, so a concurrent delegation sees it
       // as busy before it tries rather than failing when it does.
       if (reuse !== undefined) inFlight.add(reuse)
@@ -727,7 +751,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           threadMode: mode,
           threadId: reuse,
           originator: resolved.originator,
-          runTimeoutMs: resolved.runTimeoutMs,
+          runTimeoutMs: runTimeout ?? resolved.runTimeoutMs,
           images: runImages,
           outputSchema: runSchema,
           threadName: threadNameFor(call.label),
@@ -768,7 +792,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             reasoningEffort: call.reasoningEffort,
             threadMode: mode,
             originator: resolved.originator,
-            runTimeoutMs: resolved.runTimeoutMs,
+            runTimeoutMs: runTimeout ?? resolved.runTimeoutMs,
             images: runImages,
             outputSchema: runSchema,
             threadName: threadNameFor(call.label),

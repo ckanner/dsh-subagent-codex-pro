@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-const { routeRefusesImages, withImageNote, checkedWorkdir, checkedImagePath, checkedOutputSchema } = await import('../src/index.ts')
+const { routeRefusesImages, withImageNote, checkedWorkdir, checkedImagePath, checkedOutputSchema, checkedTimeout } = await import('../src/index.ts')
 
 test('the default route declares image input and is not refused', () => {
   assert.equal(routeRefusesImages({ inputModalities: ['text', 'image'] }), false)
@@ -74,4 +74,14 @@ test('an output schema must be an object-rooted JSON Schema', () => {
   assert.throws(() => checkedOutputSchema(['nope']), /must be a JSON Schema object/)
   assert.throws(() => checkedOutputSchema('nope'), /must be a JSON Schema object/)
   assert.throws(() => checkedOutputSchema(null), /must be a JSON Schema object/)
+})
+
+test('a caller-named deadline must be whole non-negative milliseconds', () => {
+  assert.equal(checkedTimeout(5400000), 5400000)
+  // 0 is how both the configuration and a call ask for no deadline at all.
+  assert.equal(checkedTimeout(0), 0)
+  assert.throws(() => checkedTimeout(-1), /must not be negative/)
+  assert.throws(() => checkedTimeout(1500.5), /whole milliseconds/)
+  assert.throws(() => checkedTimeout(Number.NaN), /finite number/)
+  assert.throws(() => checkedTimeout(Number.POSITIVE_INFINITY), /finite number/)
 })

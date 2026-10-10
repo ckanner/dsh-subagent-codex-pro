@@ -1,6 +1,26 @@
 # Changelog
 
+## 0.6.1
+
+The deadline is now a parameter, so a prompt can set it.
+
+`timeout_ms` overrides the configured `runTimeoutMs` for one delegation, and `0` means no deadline at all. The
+default was already a plugin setting, which made it usable only by editing a profile and restarting — plugin
+configuration is not hot-reloaded, and a model cannot pass a value that no parameter declares. Now the routine
+that needs tens of minutes and the lookup that needs seconds can be told apart by the model itself, in the same
+turn, without a restart.
+
+`0` is forwarded rather than treated as "unset": asking for no deadline is a different request from asking for
+the configured one.
+
+Also corrects a contradiction in the capabilities table: `outputSchema` was listed as ✅ and, three rows later,
+still inside the ❌ row left over from 0.6.0. The three refusals that remain — `maxDepth`, persona, `toolFilter`
+— are now described as not applicable rather than not implemented, with the reason: a Codex delegation is a
+leaf with no DSH child to cap, its tools are Codex's own rather than this harness's, and a persona is a system
+instruction for a child agent where this one already takes the task in `prompt`.
+
 ## 0.6.0
+
 
 The answer can now be made machine-readable, and the capability table stops understating what this provider can
 do.

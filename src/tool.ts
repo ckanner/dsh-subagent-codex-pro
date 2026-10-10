@@ -35,6 +35,8 @@ export interface CodexCall {
   readonly images?: readonly string[]
   /** A JSON Schema the final answer must conform to. */
   readonly outputSchema?: Record<string, unknown>
+  /** Deadline for this call in milliseconds; `0` means no deadline. */
+  readonly timeoutMs?: number
 }
 
 /** Everything the tool needs that does not change per call. */
@@ -129,6 +131,13 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         prompt: {
           type: 'string',
           description: 'The complete task for Codex, including everything it needs and cannot ask for.',
+        },
+        timeout_ms: {
+          type: 'integer',
+          description: 'Deadline for this delegation in milliseconds, overriding the configured default'
+            + ' (which the plugin reports when it starts). Use it when the user asks for a longer or shorter'
+            + ' run than usual — a release smoke test takes tens of minutes, where a quick lookup does not.'
+            + ' `0` means no deadline at all. A run that passes the deadline is cancelled and says so.',
         },
         output_schema: {
           type: 'object',
@@ -261,6 +270,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ? request.description
         : 'Codex delegation'
       const cwd = typeof request.cwd === 'string' && request.cwd !== '' ? request.cwd : undefined
+      const timeoutMs = typeof request.timeout_ms === 'number' ? request.timeout_ms : undefined
       const outputSchema = typeof request.output_schema === 'object' && request.output_schema !== null
         && !Array.isArray(request.output_schema)
         ? request.output_schema as Record<string, unknown>
@@ -284,6 +294,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ...(cwd === undefined ? {} : { cwd }),
         ...(images === undefined || images.length === 0 ? {} : { images }),
         ...(outputSchema === undefined ? {} : { outputSchema }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
       }
       if (options.backgroundEnabled && request.run_in_background === true) {
         return { kind: 'background' as const, jobId: options.startBackground(call) }

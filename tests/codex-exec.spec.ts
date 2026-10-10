@@ -103,8 +103,8 @@ test('the tool exposes model and effort only while the host opts in', async () =
   const props = (tool: { parameters: Record<string, unknown> }): string[] =>
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
-  assert.deepEqual(props(off), ['description', 'prompt', 'output_schema', 'images', 'cwd'])
-  assert.deepEqual(props(on), ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(off), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd'])
+  assert.deepEqual(props(on), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
   // The harness rejects a descriptor map: `parameters` must be a JSON Schema object.
   for (const tool of [off, on]) {
     assert.equal((tool.parameters as { type?: string }).type, 'object')
@@ -156,9 +156,9 @@ test('run_in_background appears only when the jobs service is present', async ()
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
   assert.deepEqual(props(createCodexTool({ ...base, backgroundEnabled: false })),
-    ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
+    ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
   assert.deepEqual(props(createCodexTool({ ...base, backgroundEnabled: true })),
-    ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort', 'run_in_background'])
+    ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort', 'run_in_background'])
 
   // Without background support the output is a plain answer, so the schema stays simple.
   const off = createCodexTool({ ...base, backgroundEnabled: false })
@@ -235,8 +235,8 @@ test('the tool declares and forwards the thread controls when enabled', async ()
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
   // disabled: the schema is exactly what it was before this feature existed
-  assert.deepEqual(props(make(false)), ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
-  assert.deepEqual(props(make(true)), ['description', 'prompt', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
+  assert.deepEqual(props(make(false)), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(make(true)), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
 
   const tool = make(true)
   await tool.execute(
@@ -399,4 +399,30 @@ test('the tool forwards an output schema and omits the field when none is named'
 
   const properties = (tool.parameters as { properties: Record<string, unknown> }).properties
   assert.deepEqual((properties.output_schema as { type?: string }).type, 'object')
+})
+
+test('the tool forwards a caller-named deadline and omits the field otherwise', async () => {
+  const { createCodexTool } = await import('../src/tool.ts')
+  const seen: (number | undefined)[] = []
+  const tool = createCodexTool({
+    cwd: '/w',
+    modelSelectionEnabled: false,
+    backgroundEnabled: false,
+    defaultThreadMode: 'ephemeral',
+    threadControlEnabled: false,
+    run: async (request) => {
+      seen.push(request.timeoutMs)
+      return { text: 'ok', threadId: undefined }
+    },
+  })
+  const signal = new AbortController().signal
+  await tool.execute({ description: 'x', prompt: 'go' }, { signal })
+  await tool.execute({ description: 'x', prompt: 'go', timeout_ms: 5400000 }, { signal })
+  await tool.execute({ description: 'x', prompt: 'go', timeout_ms: 0 }, { signal })
+  // 0 is forwarded rather than dropped: it means "no deadline", which is a
+  // different request from "use the configured one".
+  assert.deepEqual(seen, [undefined, 5400000, 0])
+
+  const properties = (tool.parameters as { properties: Record<string, unknown> }).properties
+  assert.equal((properties.timeout_ms as { type?: string }).type, 'integer')
 })

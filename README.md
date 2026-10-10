@@ -268,6 +268,11 @@ nothing was left to list or continue. `threadMode` chooses instead:
     runTimeoutMs: 600000      # deadline for one delegation; 0 disables it
 ```
 
+A call may name its own `timeout_ms`, which overrides the configured default for that one delegation — `0`
+meaning no deadline at all. That is what makes the deadline usable from a prompt: a release smoke test needs tens
+of minutes, a quick lookup does not, and the model can say which this is because the value is a parameter rather
+than a file.
+
 **A delegation that hangs is otherwise invisible.** The job stays `running`, the session waits, and nothing is
 logged — which is exactly what a stalled model request looks like from the outside. `runTimeoutMs` is the
 deadline for one whole delegation: when it passes, the run is cancelled, its child process is torn down, and the
@@ -339,7 +344,14 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 | app-server protocol (handshake, thread lifecycle, approval decisions) | ✅ |
 | interactive approvals | by design none — a delegated run is unattended, as the official provider is |
 | continuable / thread reuse | ✅ `session` reuses one; `thread_id` continues any |
-| depth limit, persona, outputSchema, toolFilter | ❌ not implemented |
+| `maxDepth` / persona / `toolFilter` | ❌ not applicable — see below |
+
+The three refusals above are not gaps to be filled. A Codex delegation is a **leaf**: it has no DSH child
+agent, so a delegation-depth cap has nothing to cap. Its tools are Codex's own — the shell, the patch tool, its
+own MCP servers — not this harness's, so a **tool filter**, which names DSH tools, cannot describe them; restrict
+Codex through its own configuration instead. And a **persona** is a system instruction for a child agent, where
+this one already takes the task in `prompt`. Declaring any of them `true` would promise the harness an
+enforcement that does not exist.
 
 The official provider remains the better choice where protocol fidelity matters.
 This exists because it cannot express these two choices, and should be retired

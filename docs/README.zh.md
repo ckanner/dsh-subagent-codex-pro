@@ -190,6 +190,8 @@ Codex 能看图、也能截图；这个工具现在能把那些图交回来。
     runTimeoutMs: 600000      # 单次委派的期限；0 表示不限制
 ```
 
+调用可以自己指定 `timeout_ms`，它**覆盖**该次委派的配置默认值 —— 填 `0` 表示**不设期限**。这正是让期限**能在提示词里用起来**的关键：发布冒烟需要几十分钟，一次快速查证不需要，而模型**能说出这次是哪种**，因为这个值是**参数**而不是文件里的一个数。
+
 **卡住的委派在外部是完全看不见的。** job 一直停在 `running`，会话一直等，日志里什么都没有 —— 而一次卡住的模型请求，从外面看就是这样。`runTimeoutMs` 是一次完整委派的期限：到点就取消这次运行、清理它的子进程，并在结果里写明 `codex-pro: the delegation exceeded its 600000 ms deadline and was cancelled`，而不是什么都没有。默认十分钟，对一类自述"要一分钟以上"的任务来说很宽裕；填 `0` 则恢复"无限等待"的旧行为。
 
 | | |
@@ -238,6 +240,8 @@ tools.subagent_codex({ description: "…", prompt: "…", run_in_background: tru
 | app-server 协议（握手、线程生命周期、批准决定） | ✅ |
 | 交互式批准 | 按设计没有 —— 委派运行是无人值守的，和官方 provider 一样 |
 | 可续接 / thread 复用 | ✅ `session` 复用一条；`thread_id` 可续接任意一条 |
-| 深度限制、persona、outputSchema、toolFilter | ❌ 未实现 |
+| `maxDepth` / persona / `toolFilter` | ❌ 不适用 —— 见下 |
+
+上面那三项拒绝**不是待补的缺口**。一次 Codex 委派是**叶子**：它**没有 DSH 子 agent**，所以"委派深度上限"没有东西可限。它的工具是 **Codex 自己的** —— shell、patch 工具、它自己的 MCP —— **不是本 harness 的**，而 **tool filter** 描述的是 DSH 工具，因此无从表达它们；要限制 Codex 请用它自己的配置。而 **persona** 是给子 agent 的系统指令，这里任务已经通过 `prompt` 给出。把任何一项声明成 `true`，都等于向 harness 承诺一个并不存在的强制力。
 
 **在协议保真度重要的场合，官方 provider 仍是更好的选择。** 本包存在，是因为它表达不了上面那两个选择；上游能表达之后，本包就该退休。
