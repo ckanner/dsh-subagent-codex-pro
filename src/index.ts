@@ -48,7 +48,7 @@ import type {
   SubagentStartRequestLike,
 } from './dsh-types.ts'
 import { settleJob } from './jobs.ts'
-import { CodexRunFailure, chooseThread, delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
+import { CodexRunFailure, DEFAULT_RUN_TIMEOUT_MS, chooseThread, delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
 import { DEFAULT_ORIGINATOR } from './wire.ts'
 import { createCodexTool } from './tool.ts'
 import type { CodexPermissionMode } from './wire.ts'
@@ -111,6 +111,15 @@ export interface Config {
    *   continue a thread of its own.
    */
   threadMode?: 'ephemeral' | 'persistent' | 'session'
+  /**
+   * Deadline for one delegation in milliseconds; `0` disables it.
+   *
+   * A delegation that hangs is otherwise invisible: the job stays `running`, the
+   * session waits, and nothing is logged. The deadline turns that into a failure
+   * with a reason. Defaults to ten minutes, which is generous against a task
+   * class whose own documentation says "a minute or more".
+   */
+  runTimeoutMs?: number
   /**
    * What the app-server records as the thread's originator.
    *
@@ -302,6 +311,7 @@ class CodexExecProvider implements SubagentProviderLike {
       model,
       reasoningEffort: effort,
       effort,
+      runTimeoutMs: this.resolved.runTimeoutMs,
       env: this.resolved.env,
     }
     diag(`provider start: model=${model ?? '<default>'} effort=${effort ?? '<default>'} cwd=${cwd} via=app-server`)
@@ -312,7 +322,9 @@ class CodexExecProvider implements SubagentProviderLike {
       localAgent: undefined,
       result: run.result.then((outcome) => ({
         output: outcome.output,
-        stopReason: outcome.stopReason,
+        // The harness's own vocabulary has no `timeout`; its `aborted` is what a
+        // cancelled run is, and the diagnostic carries the reason either way.
+        stopReason: outcome.stopReason === 'timeout' ? 'aborted' : outcome.stopReason,
         ...(outcome.diagnostic === undefined ? {} : { diagnostic: outcome.diagnostic }),
       })),
       dispose: () => run.teardown(),
@@ -327,13 +339,14 @@ class CodexExecProvider implements SubagentProviderLike {
  * @param config - provider name, defaults, and the presets to serve.
  */
 export function apply(ctx: Context, config: Config = {}): void {
-  const resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode' | 'modelSelection' | 'threadMode' | 'originator'>> & Config = {
+  const resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode' | 'modelSelection' | 'threadMode' | 'originator' | 'runTimeoutMs'>> & Config = {
     providerName: config.providerName ?? name,
     command: config.command ?? 'codex',
     permissionMode: config.permissionMode ?? DEFAULT_PERMISSION_MODE,
     modelSelection: config.modelSelection ?? true,
     threadMode: config.threadMode ?? 'ephemeral',
     originator: config.originator ?? DEFAULT_ORIGINATOR,
+    runTimeoutMs: config.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
     ...(config.model === undefined ? {} : { model: config.model }),
     ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
     ...(config.env === undefined ? {} : { env: config.env }),
@@ -344,7 +357,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.subagents.registerProvider(new CodexExecProvider(resolved))
     diag(`apply: provider "${resolved.providerName}" registered with agentOptions: true `
       + `(efforts: ${KNOWN_EFFORTS.join('/')}, permission=${resolved.permissionMode}); `
-      + `threadMode=${resolved.threadMode} originator=${JSON.stringify(resolved.originator)}; `
+      + `threadMode=${resolved.threadMode} originator=${JSON.stringify(resolved.originator)} `
+      + `timeout=${String(resolved.runTimeoutMs)}ms; `
       + `presets=${JSON.stringify(presets)}`)
   } catch (error: unknown) {
     diag(`apply: provider registration FAILED: ${String(error)}`)
@@ -567,6 +581,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           threadMode: mode,
           threadId: reuse,
           originator: resolved.originator,
+          runTimeoutMs: resolved.runTimeoutMs,
           threadName: threadNameFor(call.label),
           env: resolved.env,
           signal,
@@ -605,6 +620,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             reasoningEffort: call.reasoningEffort,
             threadMode: mode,
             originator: resolved.originator,
+            runTimeoutMs: resolved.runTimeoutMs,
             threadName: threadNameFor(call.label),
             env: resolved.env,
             signal,

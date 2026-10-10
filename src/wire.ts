@@ -63,7 +63,7 @@ export interface CodexImage {
 }
 
 /** The stop reasons one run can end with. */
-export type CodexStopReason = 'completed' | 'max-tokens' | 'error' | 'aborted'
+export type CodexStopReason = 'completed' | 'max-tokens' | 'error' | 'aborted' | 'timeout'
 
 /**
  * How long a thread lives.

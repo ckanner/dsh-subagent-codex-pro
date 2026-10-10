@@ -1,6 +1,27 @@
 # Changelog
 
+## 0.3.3
+
+A delegation now has a deadline, because one without it is invisible when it stalls.
+
+`runTimeoutMs` bounds one whole delegation, defaulting to ten minutes and disabled by `0`. When the deadline
+passes, the run is cancelled, the child process is torn down, and the result carries
+`codex-pro: the delegation exceeded its 600000 ms deadline and was cancelled` rather than nothing at all.
+
+The harness's own vocabulary has no `timeout` stop reason, so the provider path reports a cancelled run as
+`aborted` while the diagnostic carries the reason; this plugin's own tool reports `timeout` and formats the
+message itself.
+
+Found in a real session: a screenshot delegation had been running for seven minutes at 0% CPU with one
+established connection to a local proxy, no rollout written, and nothing anywhere in the log to say so. The
+proxy turned out to be healthy — the stall was in the streaming request — which is precisely why the deadline
+matters more than the diagnosis: whatever the cause, the wait now ends with a reason.
+
+Verified live: a three-second deadline cancelled a run at 3.1 s, returned the diagnostic, and left no child
+process behind.
+
 ## 0.3.2
+
 
 A background delegation no longer loses its images.
 

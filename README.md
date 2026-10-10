@@ -182,7 +182,15 @@ nothing was left to list or continue. `threadMode` chooses instead:
 - id: codex-pro
   config:
     threadMode: session       # ephemeral (default) | persistent | session
+    runTimeoutMs: 600000      # deadline for one delegation; 0 disables it
 ```
+
+**A delegation that hangs is otherwise invisible.** The job stays `running`, the session waits, and nothing is
+logged — which is exactly what a stalled model request looks like from the outside. `runTimeoutMs` is the
+deadline for one whole delegation: when it passes, the run is cancelled, its child process is torn down, and the
+result says `codex-pro: the delegation exceeded its 600000 ms deadline and was cancelled` instead of nothing at
+all. The default is ten minutes, generous against a task class whose own documentation says "a minute or more";
+`0` restores the old behaviour of waiting forever.
 
 | | |
 |---|---|

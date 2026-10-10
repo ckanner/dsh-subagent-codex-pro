@@ -52,6 +52,12 @@ export interface CodexRunSpec {
   /** What the app-server records as the thread's originator. */
   readonly originator?: string | undefined
   /**
+   * Deadline for the whole delegation in milliseconds.
+   *
+   * `0` disables it. Defaults to {@link DEFAULT_RUN_TIMEOUT_MS}.
+   */
+  readonly runTimeoutMs?: number | undefined
+  /**
    * A name for a persistent thread, shown in the Codex application's thread list.
    *
    * Ignored for `ephemeral`: a thread that leaves nothing behind has no list to
@@ -108,6 +114,16 @@ interface ManagedChild {
   waitForExit(timeoutMs?: number): Promise<void>
 }
 
+/**
+ * How long one delegation may take before it is cancelled.
+ *
+ * A delegation that hangs is invisible: the job stays `running`, nothing is
+ * logged, and the session waits. The deadline turns that into a failure with a
+ * reason. Ten minutes is generous against a package whose own README says a
+ * delegation takes "a minute or more", and `0` disables it.
+ */
+export const DEFAULT_RUN_TIMEOUT_MS = 600_000
+
 /** The failure taxonomy carried out of a run. */
 interface FailureFacts {
   readonly stage: string
@@ -124,6 +140,11 @@ export class CodexRunFailure extends Error {
     this.facts = facts
     this.name = 'CodexRunFailure'
   }
+}
+
+/** The diagnostic for a delegation the deadline stopped. */
+export function describeTimeout(timeoutMs: number): string {
+  return `codex-pro: the delegation exceeded its ${String(timeoutMs)} ms deadline and was cancelled`
 }
 
 /** Render failure facts for a diagnostic string. */
@@ -273,6 +294,8 @@ export async function startCodexRun(
   processFailure.catch(() => {})
 
   const runAbort = new AbortController()
+  /** Set when the deadline fired, so the settlement can say why it ended. */
+  let timedOut = false
   const requestCancel = (): void => {
     if (runAbort.signal.aborted) return
     runAbort.abort(new Error('codex-pro: run cancelled locally'))
@@ -280,7 +303,18 @@ export async function startCodexRun(
   }
   const onAbort = (): void => { requestCancel() }
 
+  const timeoutMs = spec.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS
+  const deadline = timeoutMs > 0
+    ? setTimeout(() => {
+        timedOut = true
+        requestCancel()
+      }, timeoutMs)
+    : undefined
+  // Never hold the process open for a deadline that only cancels work.
+  deadline?.unref?.()
+
   const teardown = async (): Promise<void> => {
+    if (deadline !== undefined) clearTimeout(deadline)
     wire.close()
     try { child.proc.stdin.end() } catch { /* already closed */ }
     child.terminate()
@@ -340,8 +374,10 @@ export async function startCodexRun(
       const permission = wire.collectDiagnostic()
       return {
         output: terminal.output,
-        stopReason: terminal.stopReason,
-        diagnostic: permission === undefined ? failure : `${failure}\n${permission}`,
+        stopReason: timedOut ? 'timeout' : terminal.stopReason,
+        diagnostic: timedOut
+          ? `${describeTimeout(timeoutMs)}${permission === undefined ? '' : `\n${permission}`}`
+          : permission === undefined ? failure : `${failure}\n${permission}`,
         threadId: wire.threadId,
         images: terminal.images,
       }
@@ -352,8 +388,10 @@ export async function startCodexRun(
       const permission = wire.collectDiagnostic()
       return {
         output: [],
-        stopReason: runAbort.signal.aborted ? 'aborted' : 'error',
-        diagnostic: permission === undefined ? failure : `${failure}\n${permission}`,
+        stopReason: timedOut ? 'timeout' : runAbort.signal.aborted ? 'aborted' : 'error',
+        diagnostic: timedOut
+          ? `${describeTimeout(timeoutMs)}${permission === undefined ? '' : `\n${permission}`}`
+          : permission === undefined ? failure : `${failure}\n${permission}`,
         threadId: wire.threadId,
         images: wire.images,
       }
@@ -467,6 +505,8 @@ export async function delegateOnce(options: {
   readonly originator?: string | undefined
   /** A name for a persistent thread, shown in the Codex application. */
   readonly threadName?: string | undefined
+  /** Deadline for the whole delegation in milliseconds; `0` disables it. */
+  readonly runTimeoutMs?: number | undefined
   readonly env?: Readonly<Record<string, string>> | undefined
   readonly signal: AbortSignal
   /** Called once the run is published, for diagnostics. */
@@ -492,6 +532,7 @@ export async function delegateOnce(options: {
         threadMode: options.threadMode,
         resumeThreadId: options.threadId,
         originator: options.originator,
+        runTimeoutMs: options.runTimeoutMs,
         threadName: options.threadName,      env: options.env,
       onProgress: options.onProgress,
     },

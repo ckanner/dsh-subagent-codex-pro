@@ -101,6 +101,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ? ' A delegation typically takes a minute or more: set `run_in_background` unless your next action'
           + ' depends on the result.'
         : '')
+      + ' A delegation is cancelled if it exceeds the deadline the plugin is configured with, and the result says so.'
       + (options.threadControlEnabled
         ? ' A delegation runs in a Codex thread whose lifetime is `'
           + options.defaultThreadMode

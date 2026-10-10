@@ -126,7 +126,10 @@ Codex 能看图、也能截图；这个工具现在能把那些图交回来。
 - id: codex-pro
   config:
     threadMode: session       # ephemeral（默认）| persistent | session
+    runTimeoutMs: 600000      # 单次委派的期限；0 表示不限制
 ```
+
+**卡住的委派在外部是完全看不见的。** job 一直停在 `running`，会话一直等，日志里什么都没有 —— 而一次卡住的模型请求，从外面看就是这样。`runTimeoutMs` 是一次完整委派的期限：到点就取消这次运行、清理它的子进程，并在结果里写明 `codex-pro: the delegation exceeded its 600000 ms deadline and was cancelled`，而不是什么都没有。默认十分钟，对一类自述"要一分钟以上"的任务来说很宽裕；填 `0` 则恢复"无限等待"的旧行为。
 
 | | |
 |---|---|
