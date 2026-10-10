@@ -375,6 +375,53 @@ export type { JsonRpcMessage }
  * @returns the child's final message.
  * @throws when the run does not complete; the diagnostic is the message.
  */
+/** Which thread a call should continue, if any. */
+export interface ThreadChoice {
+  /** The thread to continue, or `undefined` to start a fresh one. */
+  readonly reuse: string | undefined
+  /**
+   * The remembered thread this call wanted but found busy.
+   *
+   * Reported rather than dropped: the call still runs, in its own thread, and a
+   * log line is the only way to know the session's thread was skipped.
+   */
+  readonly skippedBusy: string | undefined
+}
+
+/**
+ * Decide which thread one call continues.
+ *
+ * `session` mode has one thread per Agent session, but a thread carries one turn
+ * at a time: two delegations sent together would otherwise both reach for it and
+ * the second would fail. A remembered thread that another delegation is already
+ * using is therefore skipped, and this call gets a thread of its own — which is
+ * what `persistent` does anyway, so parallel work degrades to the mode that
+ * supports it instead of failing and retrying.
+ *
+ * An id the caller passed explicitly is never skipped: continuing *that* thread
+ * was the request, and silently running somewhere else would answer a different
+ * question.
+ *
+ * @param input - the call's explicit id, the configured mode, the session's
+ * remembered thread, and the threads currently in flight.
+ * @returns the thread to continue and the remembered one that was busy.
+ */
+export function chooseThread(input: {
+  readonly explicit: string | undefined
+  readonly configured: 'ephemeral' | 'persistent' | 'session'
+  readonly remembered: string | undefined
+  readonly inFlight: ReadonlySet<string>
+}): ThreadChoice {
+  if (input.explicit !== undefined) return { reuse: input.explicit, skippedBusy: undefined }
+  if (input.configured !== 'session' || input.remembered === undefined) {
+    return { reuse: undefined, skippedBusy: undefined }
+  }
+  if (input.inFlight.has(input.remembered)) {
+    return { reuse: undefined, skippedBusy: input.remembered }
+  }
+  return { reuse: input.remembered, skippedBusy: undefined }
+}
+
 /**
  * A delegation that did not complete.
  *

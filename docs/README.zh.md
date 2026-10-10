@@ -130,7 +130,7 @@ run done: text=8B
 
 因为 originator 没法说明 thread 来自哪里，持久 thread 会通过 `thread/name/set` 命名为 `DSH · <本次调用的描述>` —— 这才是人在列表里看到的内容。
 
-**一条 thread 同时只能承载一个 turn，所以 `session` 不适合并行工作。** 同一会话同时发出的两条委派会争用那条被记住的 thread，第二条在 `thread/resume` 处失败：`thread-store conflict: … already has an active writer`。`ephemeral` 和 `persistent` 没有这个限制：每次调用各得一条 thread。`session` 模式下若被记住的 thread 无法续接，插件会另起一条，所以是**降级而不是报错** —— 却是**静默降级**，而多出来的那条 thread 并不是 `session` 承诺的东西。要**顺序执行并让对话延续**就选 `session`；要**同时跑多条委派**就选 `persistent` 或 `ephemeral`。
+**一条 thread 同时只能承载一个 turn。** 同一会话同时发出的两条委派会都去争那条被记住的 thread，app-server 会以 `thread-store conflict: … already has an active writer` 拒绝第二条。所以 `session` 模式下的调用会**先检查**：若那条被记住的 thread 正被另一个委派使用，就跳过它，本次调用另起一条，并把这次跳过**写进日志**。并行工作照常进行 —— 只是不再共用一段对话，而这正是 `persistent` 本来的行为，于是该模式**退化为支持这种工作形态的那个模式**。要**顺序执行并让对话延续**就选 `session`；要**同时跑多条委派**就选 `persistent` 或 `ephemeral`。
 
 **为什么它不只是"方便"。** 被续接的 thread 保持**同样的提示前缀**，于是端点的缓存持续命中。在 Codex 侧实测：**93–99% 的 input token 来自缓存**；同样的工作若走 plan-usage 路由实测为 **0%**，因为那条路由拒绝一切缓存控制。
 

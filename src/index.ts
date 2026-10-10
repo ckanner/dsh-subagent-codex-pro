@@ -48,7 +48,7 @@ import type {
   SubagentStartRequestLike,
 } from './dsh-types.ts'
 import { settleJob } from './jobs.ts'
-import { CodexRunFailure, delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
+import { CodexRunFailure, chooseThread, delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
 import { DEFAULT_ORIGINATOR } from './wire.ts'
 import { createCodexTool } from './tool.ts'
 import type { CodexPermissionMode } from './wire.ts'
@@ -293,6 +293,15 @@ export function apply(ctx: Context, config: Config = {}): void {
      */
     const sessionThread = new Map<string, string>()
 
+    /**
+     * Threads this Agent is delegating in right now.
+     *
+     * A thread carries one turn at a time, so the session's remembered thread
+     * cannot be handed to two calls at once. Tracking it here turns that into a
+     * decision before the call starts rather than a failure after it.
+     */
+    const inFlight = new Set<string>()
+
     /** One call's resolved thread decision. */
     interface CallLike {
       /** The model's short description, used as the thread name's label. */
@@ -316,12 +325,25 @@ export function apply(ctx: Context, config: Config = {}): void {
       const mode = call.threadMode ?? (configured === 'ephemeral' ? 'ephemeral' : 'persistent')
       const remembered = sessionThread.get(String(agent.id))
       const explicit = call.threadId
-      const reuse = explicit ?? (explicit === undefined && configured === 'session' && mode === 'persistent'
-        ? remembered
-        : undefined)
+      const choice = chooseThread({
+        explicit,
+        configured,
+        // A remembered thread is only reusable for a durable call; an ephemeral
+        // one was never remembered in the first place.
+        remembered: mode === 'persistent' ? remembered : undefined,
+        inFlight,
+      })
+      const reuse = choice.reuse
+      if (choice.skippedBusy !== undefined) {
+        diag(`run: session thread ${choice.skippedBusy} is busy with another delegation - `
+          + `this call gets a thread of its own`)
+      }
       diag(`run: model=${call.model ?? '<default>'} effort=${call.reasoningEffort ?? '<default>'} `
         + `thread=${mode}${reuse === undefined ? '' : ` resume=${reuse}`} `
         + `cwd=${cwd} prompt=${String(call.prompt.length)}B via=app-server`)
+      // Claim the thread for the whole call, so a concurrent delegation sees it
+      // as busy before it tries rather than failing when it does.
+      if (reuse !== undefined) inFlight.add(reuse)
       try {
         const outcome = await delegateOnce({
           prompt: call.prompt,
@@ -381,6 +403,8 @@ export function apply(ctx: Context, config: Config = {}): void {
           return { text: withThreadMarker(outcome, mode), threadId: outcome.threadId }
         }
         throw error
+      } finally {
+        if (reuse !== undefined) inFlight.delete(reuse)
       }
     }
 

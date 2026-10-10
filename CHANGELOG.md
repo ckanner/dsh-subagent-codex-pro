@@ -1,6 +1,20 @@
 # Changelog
 
+## 0.2.2
+
+**`session` mode no longer collides with itself.** A thread carries one turn at a time, so two delegations sent
+together from one session both reached for the remembered thread and the app-server refused the second with
+`thread-store conflict: … already has an active writer`. The plugin now tracks which threads its Agent is
+delegating in and checks before it starts: a remembered thread in use is skipped, the call gets a thread of its
+own, and the skip is logged. Parallel work keeps running, and the mode falls back to `persistent` — which is
+what that shape of work needs anyway — instead of failing and retrying.
+
+The decision is a pure function, `chooseThread`, so it is covered by tests rather than by an app-server. An id
+the caller passed explicitly is never skipped: continuing that thread was the request, and running somewhere
+else would answer a different question.
+
 ## 0.2.1
+
 
 `apply` now records the thread mode and the originator, so the log says which lifetime is in force without
 anyone reading the profile to find out.
