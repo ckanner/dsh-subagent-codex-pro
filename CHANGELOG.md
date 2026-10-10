@@ -13,6 +13,12 @@ turn, without a restart.
 `0` is forwarded rather than treated as "unset": asking for no deadline is a different request from asking for
 the configured one.
 
+The README now records how a profile overrides this package's row. The loader replaces the whole `config` map
+rather than merging it — read out of `applyEntryPatches`, which assigns each top-level field in turn, `config`
+being one of them — so overriding `runTimeoutMs` without restating `presets` mounts a row that matches no
+preset and therefore serves no session. The failure is silent, the log line names the presets actually received,
+and both READMEs now carry the wrong and right shapes side by side.
+
 Also corrects a contradiction in the capabilities table: `outputSchema` was listed as ✅ and, three rows later,
 still inside the ❌ row left over from 0.6.0. The three refusals that remain — `maxDepth`, persona, `toolFilter`
 — are now described as not applicable rather than not implemented, with the reason: a Codex delegation is a

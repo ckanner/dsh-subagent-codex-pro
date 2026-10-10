@@ -179,6 +179,35 @@ Codex 能看图、也能截图；这个工具现在能把那些图交回来。
 
 **后台调用拿到的是路径，不是图片。** 前台委派返回图片块，模型**看得到**那张图。`run_in_background` 的委派返回的是 job id，而经由 `job_output` 读回的一切**按契约都是字符串** —— 所以它的图片改为在文字里报告路径：`[1 image: /Users/…/shot.png]`。无论哪种方式，文件都在本机上。**想让模型真正看到截图，就用前台委派。** 协议本身接受 `input_image`、`local_image`、`image_url` 甚至音频，但本工具目前只发文字。在这一点改变之前，请在 prompt 里**写出路径**：Codex 会用它自己的图片工具打开那个文件，这一点已验证 —— 只给路径让它描述一张截图，它读出了图上列出的各个 provider。
 
+## 在 profile 里覆盖这一行
+
+本包声明的这一行是一个 bundle patch。想要不同设置的 profile 会添加一行**同 `id`** 的条目，而加载器会**把整个 `config` 映射替换掉**：它遍历 patch 的顶层字段逐个赋给目标，而 `config` 正是其中之一。它**不做深合并**，也**不合并数组**。
+
+所以**每个字段都必须重述**，否则它就没了：
+
+```yaml
+# ✗ `presets` 没了，工具也就没了。这一行照样挂载 —— 只是不匹配任何 preset，
+#   于是 `subagent_codex` 在任何会话里都不会出现。
+- id: codex-pro
+  config:
+    runTimeoutMs: 5400000
+
+# ✓ 整份映射，每个字段都在
+- id: codex-pro
+  name: 'dsh-subagent-codex-pro'
+  config:
+    providerName: codex-pro
+    presets: [daily, heavy]
+    runTimeoutMs: 5400000
+```
+
+这种失败**安静得最糟糕**：`id` 匹配不到任何条目、或 `name` 与目标不一致的 patch，会被**警告后跳过**，而不是报错；而丢掉 `presets` 的 config **照样挂载**，只是不为任何会话服务。本插件写进 `~/.dsh/codex-pro.log` 的那行 `apply` 会列出它**实际收到**的 presets —— 要核查就看那一行：
+
+```
+apply: v0.6.1 provider "codex-pro" registered … timeout=5400000ms; presets=["daily","heavy"]
+                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
 ## 线程生命周期
 
 过去每次委派都开一个**临时 thread** —— app-server 在连接结束时把它删掉，所以**没有任何东西可以列出或续接**。`threadMode` 让你来选：

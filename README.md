@@ -256,6 +256,41 @@ tool currently sends text only. Until that changes, name the **path** in the pro
 with its own image tool, which is verified — asked to describe a screenshot by path, it read out the providers
 listed on it.
 
+## Overriding this row in a profile
+
+The row this package declares is a bundle patch. A profile that wants different settings adds its own row with
+the same `id`, and the loader **replaces the whole `config` map**: it walks the patch's top-level fields and
+assigns each to the target, and `config` is one of those fields. It does not merge deeply, and it does not merge
+arrays.
+
+So every field has to be restated, or it is gone:
+
+```yaml
+# ✗ `presets` is gone, and with it the tool. The row still mounts — it just
+#   matches no preset, so `subagent_codex` never appears in any session.
+- id: codex-pro
+  config:
+    runTimeoutMs: 5400000
+
+# ✓ the whole map, every field
+- id: codex-pro
+  name: 'dsh-subagent-codex-pro'
+  config:
+    providerName: codex-pro
+    presets: [daily, heavy]
+    runTimeoutMs: 5400000
+```
+
+This failure is quiet in the worst way. A patch whose `id` matches nothing, or whose `name` disagrees with the
+target's, is **skipped with a warning** rather than an error; and a `config` that lost `presets` still mounts,
+it simply serves no session. The `apply` line this plugin writes to `~/.dsh/codex-pro.log` names the presets it
+actually received, which is where to look:
+
+```
+apply: v0.6.1 provider "codex-pro" registered … timeout=5400000ms; presets=["daily","heavy"]
+                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
 ## Thread lifetime
 
 Every delegation used to open an ephemeral thread — the app-server deletes it when the connection ends, so
