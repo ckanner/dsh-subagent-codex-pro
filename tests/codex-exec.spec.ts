@@ -12,7 +12,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -86,11 +86,23 @@ test('a real run reaches Codex with a chosen model and effort', { skip: process.
   assert.match(outcome.text, /PROBE_OK/)
 })
 
-test('the codex CLI this probe depends on is present', async () => {
-  // Cheap precondition so a missing CLI reads as a missing CLI.
-  const { stdout } = await run('codex', ['--version'])
-  assert.match(stdout.trim(), /\d+\.\d+\.\d+/)
-})
+/** Whether the CLI this file's live cases need is on this machine's PATH. */
+const codexPresent = (() => {
+  try {
+    return spawnSync('codex', ['--version'], { stdio: 'ignore' }).status === 0
+  } catch {
+    return false
+  }
+})()
+
+test('the codex CLI this probe depends on is present',
+  // A precondition, so a machine without the CLI skips it rather than failing a
+  // suite that is otherwise hermetic. CI has no Codex installed.
+  { skip: codexPresent ? false : 'the codex CLI is not on PATH' },
+  async () => {
+    const { stdout } = await run('codex', ['--version'])
+    assert.match(stdout.trim(), /\d+\.\d+\.\d+/)
+  })
 
 test('the tool exposes model and effort only while the host opts in', async () => {
   const { createCodexTool } = await import('../src/tool.ts')
