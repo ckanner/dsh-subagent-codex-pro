@@ -85,10 +85,16 @@ That keeps the harness's preset-row machinery out of the path entirely. A preset
 needs no rows of its own: `presets` names the committed Agent presets that get
 the tool — `daily` and `heavy` here.
 
-Because the tool name is fixed, the official `tool-subagent-codex` row is
-**disabled** in those presets. Two rows registering the same tool name in one
-Agent's scope collide: the second registration throws and its tool silently never
-appears.
+Because the tool name is fixed, the official `subagent_codex` must not also
+serve those presets. As of DSH 0.2.1 the official
+`@deepseek-ai/dsh-subagent-codex` bundle ships `tool-subagent-codex` as a
+**global Host tool** (visible to every preset), so a profile cannot switch it
+off by disabling a per-preset row. This plugin registers its tool into the
+Agent's own scope on `agent/created`, and a scoped registration shadows the
+global one for its Agents — the official README documents the same precedence.
+Two registrations in *one* scope still collide: the later one throws and its
+tool silently never appears, which is why a profile must not also enable a
+same-name `tool-subagent` row beside this provider.
 
 **Whatever the prompt names is what runs.** `model` and `reasoning_effort` are in
 the schema, and an explicit choice in the call wins; when a delegation names

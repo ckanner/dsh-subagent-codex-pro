@@ -65,7 +65,7 @@ ctx.on('agent-preset/selected', (sessionId, preset) => { … })
 
 这样就把 harness 的 preset 行机制**完全排除在路径之外**。preset 不需要任何自己的行：`presets` 只声明哪些已确定的 Agent preset 会拿到这个工具 —— 这里是 `daily` 和 `heavy`。
 
-因为工具名是固定的，官方 `tool-subagent-codex` 行在这些 preset 里被**禁用**。两行在同一个 Agent scope 里注册同名工具会冲突：后一次注册抛错，它的工具会**静默地永不出现**。
+因为工具名是固定的，官方 `subagent_codex` 不能在这些 preset 里同时生效。从 DSH 0.2.1 起，官方 `@deepseek-ai/dsh-subagent-codex` bundle 把 `tool-subagent-codex` 作为**全局 Host 工具**插入（每个 preset 都可见），所以 profile 无法通过禁用一个 per-preset 行来关掉它。本插件在 `agent/created` 时把工具注册进 Agent 自己的 scope，而 scope 内的注册会对该 Agent **遮蔽**全局同名工具 —— 官方 README 记录的是同一条优先级。**同一个** scope 内的两次注册仍然会冲突：后一次抛错，它的工具会**静默地永不出现**，所以 profile 不能在这个 provider 之外再启用一个同名的 `tool-subagent` 行。
 
 **调用里写什么，就跑什么。** `model` 和 `reasoning_effort` 在 schema 里，且调用中的显式选择优先；当一次委派两个都没写时，选择权留给 Codex 自己的配置（`~/.codex/config.toml`）—— 插件**故意不设默认值**，这样不会有任何东西静默覆盖任何一方。`modelSelection: false` 会把这两个字段完全隐藏。
 

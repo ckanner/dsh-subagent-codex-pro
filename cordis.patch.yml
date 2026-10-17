@@ -4,10 +4,15 @@
 # per Agent, a `subagent_codex` tool that can carry a model and a reasoning
 # effort — into the Agent's own context, the way the LCU plugin registers `js`.
 #
-# `presets` names the committed Agent presets that get the tool. The official
-# `tool-subagent-codex` row is disabled in those presets, because two rows
-# registering the same tool name in one Agent's scope collide: the later
-# registration throws and that tool silently never appears.
+# `presets` names the committed Agent presets that get the tool. Since DSH
+# 0.2.1 the official `@deepseek-ai/dsh-subagent-codex` bundle contributes a
+# *global* Host `subagent_codex` tool instead of a per-preset row, so a profile
+# cannot switch it off by disabling a preset copy. This plugin registers its
+# tool into the Agent's own scope on `agent/created`, and a scoped registration
+# shadows the global one for its Agents — the official README documents the same
+# precedence. Two registrations in one scope still collide (the later one throws
+# and its tool silently never appears), so a profile must not also enable a
+# same-name `tool-subagent` row beside this provider.
 
 - insert:
     - id: codex-pro

@@ -411,7 +411,7 @@ class CodexExecProvider implements SubagentProviderLike {
    * @returns a run handle; its `result` settles with the child's final message.
    */
   async start(request: SubagentStartRequestLike): Promise<SubagentRunLike> {
-    const cwd = request.parent.session.header.cwd
+    const cwd = request.cwd ?? request.parent.session.header.cwd
     if (cwd === undefined) {
       throw new Error('codex-pro: the parent session has no working directory to delegate from')
     }

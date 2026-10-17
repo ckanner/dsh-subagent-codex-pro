@@ -206,7 +206,7 @@ test('the final answer wins over an unphased one, and commentary is ignored', as
       if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
       if (method === 'turn/start') {
         setImmediate(() => {
-          for (const [phase, text] of [['commentary', 'thinking'], [null, 'unphased'], ['final_answer', 'the answer']] as const) {
+          for (const [phase, text] of [['commentary', 'thinking'], [null, 'unphased'], ['partial_answer', 'partial'], ['final_answer', 'the answer']] as const) {
             self.notify('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', phase, text } })
           }
           self.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } })
@@ -225,6 +225,37 @@ test('the final answer wins over an unphased one, and commentary is ignored', as
   peer.pump()
   const result = await running
   assert.deepEqual(result.output, [{ type: 'text', text: 'the answer' }])
+})
+
+test('a partial answer is the fallback when no final answer arrives', async () => {
+  // Codex emits `partial_answer` for stable answer text that later assistant
+  // output or tool calls may follow. DSH 0.2.1's official adapter selects
+  // final -> partial -> unphased; a run with only a partial answer must not fail.
+  const { wire, peer } = harness({
+    respond: (method, _params, self) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+      if (method === 'turn/start') {
+        setImmediate(() => {
+          for (const [phase, text] of [['commentary', 'thinking'], [null, 'unphased'], ['partial_answer', 'stable answer']] as const) {
+            self.notify('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', phase, text } })
+          }
+          self.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } })
+        })
+        return { turn: { id: 'turn-1' } }
+      }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.startThread('/work')
+  peer.pump()
+  const running = wire.runTurn(['go'])
+  await new Promise((resolve) => { setImmediate(resolve) })
+  peer.pump()
+  const result = await running
+  assert.deepEqual(result.output, [{ type: 'text', text: 'stable answer' }])
 })
 
 test('a failing turn surfaces the taxonomy and a context overflow stops as max-tokens', async () => {

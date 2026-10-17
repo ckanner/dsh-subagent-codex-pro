@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.2
+
+Compatibility with DSH 0.2.1's subagent seam and the Codex app-server it drives.
+
+- Accept the `partial_answer` agent-message phase. It is retained as a fallback answer and selection stays
+  final → partial → unphased, matching the official provider as of DSH 0.2.1. A turn that emitted only a partial
+  answer no longer fails with `unknown agent message phase "partial_answer"`.
+- Use the working directory the shared subagent service selected (`request.cwd`) when one is supplied, falling
+  back to the parent session's directory. Provider-row and workflow dispatch now honour it; this plugin's own
+  tool path is unchanged because it already resolves the directory itself.
+- Document the changed official activation model: since DSH 0.2.1 the official `subagent_codex` is a global Host
+  tool, and this plugin's per-Agent registration shadows it for the configured presets rather than a per-preset
+  disabled row switching it off. A same-scope duplicate still collides, so the profile must not enable a
+  same-name `tool-subagent` row beside this provider.
+
 ## 0.6.1
 
 The deadline is now a parameter, so a prompt can set it.

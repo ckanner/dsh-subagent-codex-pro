@@ -37,6 +37,12 @@ export interface SubagentStartRequestLike {
   readonly prompt: readonly (TextBlock | OtherBlock)[]
   readonly parent: AgentLike
   readonly signal: AbortSignal
+  /**
+   * A working directory the shared subagent service selected for this run, when
+   * it resolved one (DSH 0.2.1 and later). Older dispatches omit it, and the
+   * provider then falls back to the parent session's directory.
+   */
+  readonly cwd?: string
   readonly agentOptions?: AgentOptionsLike
   /**
    * A JSON Schema the child's answer must conform to, when the tool row carries

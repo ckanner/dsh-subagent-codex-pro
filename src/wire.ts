@@ -310,6 +310,8 @@ export class CodexAppServerWire {
   #turnCompleted: { promise: Promise<TurnCompletion>; resolve: (value: TurnCompletion) => void } | undefined
   #earlyTurnNotifications: { method: string; params: unknown; order: number }[] = []
   #lastFinalAnswer: string | undefined
+  /** Stable partial answer text that later assistant output or tool calls may follow. */
+  #lastPartialAnswer: string | undefined
   #lastUnphasedAnswer: string | undefined
   #diagnostic: string | undefined
   /** Images the run produced, in the order the app-server reported them. */
@@ -648,7 +650,9 @@ export class CodexAppServerWire {
 
   /** The best non-commentary answer observed so far, preserving exact bytes. */
   #collectOutput(): { type: 'text'; text: string }[] {
-    const selected = this.#lastFinalAnswer ?? this.#lastUnphasedAnswer
+    // Latest final answer wins, then stable partial text (DSH 0.2.1's official
+    // adapter selects the same way), then an unphased message for compatibility.
+    const selected = this.#lastFinalAnswer ?? this.#lastPartialAnswer ?? this.#lastUnphasedAnswer
     return selected !== undefined && selected.trim().length > 0 ? [{ type: 'text', text: selected }] : []
   }
 
@@ -821,6 +825,7 @@ export class CodexAppServerWire {
         ? item.text
         : (() => { throw new Error(`${P}: app-server returned an invalid agent message`) })()
       if (item.phase === 'final_answer') this.#lastFinalAnswer = text
+      else if (item.phase === 'partial_answer') this.#lastPartialAnswer = text
       else if (item.phase === null) this.#lastUnphasedAnswer = text
       else if (item.phase === 'commentary') this.#progress(text)
       else {
