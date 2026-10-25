@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.3
+
+A missing Codex executable now fails one delegation instead of the Host.
+
+`spawn codex` reports `ENOENT` when the executable is not on the Host's `PATH`
+— for example after a Node version switch through a version manager drops the
+global npm install. The run failed correctly, but the process-cleanup path
+attached its termination-timer cleanup with a bare `finally()` on the
+already-rejected exit promise. That derived rejection was unhandled, and the
+Host's global unhandled-rejection handler escalates it to a fatal load failure:
+DSH Desktop exited instead of returning the delegation error, taking every
+running session with it. Cleanup now handles both settlements, so the only
+observable result is a failed run with its diagnostic.
+
+Add a regression test: a delegation whose executable is missing rejects
+without leaving an unhandled rejection behind.
+
+The README now records how to point `command` at an absolute executable for a
+Host whose launch-time `PATH` does not carry the global install.
+
 ## 0.6.2
 
 Compatibility with DSH 0.2.1's subagent seam and the Codex app-server it drives.

@@ -70,6 +70,15 @@ own (`src/jsonrpc.ts`), and the app-server is started as
 manifest. `src/codex-exec.ts`, the earlier `codex exec` path, is retained and
 tested but unused.
 
+The executable is the `command` setting (default `codex`), resolved through the
+Host's `PATH` — and the desktop app captures that environment when it launches.
+A Node version switch, or any change to the login shell, can leave the global
+install out of it. When that happens, set `command` to an absolute path: the
+official `@deepseek-ai/dsh-subagent-codex` bundle ships a pinned executable
+inside the profile (`node_modules/@openai/codex-darwin-arm64/vendor/<arch>/bin/codex`
+on Apple silicon), so Codex Pro and the official provider can share one CLI
+without depending on `PATH`.
+
 ### Tool registration: this plugin's own context
 
 The plugin registers the delegation tool **itself**, on `agent/created`, into

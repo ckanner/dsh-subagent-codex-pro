@@ -227,7 +227,15 @@ function spawnAppServer(spec: CodexRunSpec, graceMs: number): ManagedChild {
         try { proc.kill('SIGKILL') } catch { /* already gone */ }
       }, graceMs)
       timer.unref?.()
-      void done.finally(() => { clearTimeout(timer) })
+      // Both settlements must clear the timer. A `finally()` here would create a
+      // second, unhandled rejection when the spawn itself failed, and the Host's
+      // unhandled-rejection handler treats that as a fatal load failure: a
+      // missing `codex` executable would take DSH Desktop down instead of
+      // failing one delegation.
+      void done.then(
+        () => { clearTimeout(timer) },
+        () => { clearTimeout(timer) },
+      )
     },
     waitForExit: (timeoutMs) => {
       const exited = done.then(() => undefined, () => undefined)
