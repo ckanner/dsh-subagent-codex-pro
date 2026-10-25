@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.4
+
+Tests only; the shipped runtime is unchanged.
+
+The live suite still read `delegateOnce` as if it returned the answer string, but
+the function has returned `{ text, threadId, images }` since persistent threads
+landed. Both live cases therefore failed their assertion even though the real
+app-server turn had answered correctly; they now read `outcome.text`.
+
+Verified against `@openai/codex` 0.164.0: the hermetic suite passes, and both
+live cases complete a real turn (model + reasoning effort, and the defaults).
+The 0.164.0 app-server protocol keeps every message phase and server request
+this wire handles; it only adds optional `TurnStartParams` fields
+(`parentTurnId`, `rootTurnId`) and two notifications this provider ignores.
+
 ## 0.6.3
 
 A missing Codex executable now fails one delegation instead of the Host.

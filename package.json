@@ -1,6 +1,6 @@
 {
   "name": "dsh-subagent-codex-pro",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "A Codex delegation tool for DeepSeek Harness that can carry a model and a reasoning effort per call.",
   "type": "module",
   "main": "lib/index.js",

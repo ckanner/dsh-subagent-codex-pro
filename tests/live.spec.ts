@@ -19,7 +19,7 @@ import { delegateOnce } from '../src/run.ts'
 const live = process.env.CODEX_SUBAGENT_LIVE === '1'
 
 test('a real app-server run carries the model and the effort', { skip: !live }, async () => {
-  const text = await delegateOnce({
+  const outcome = await delegateOnce({
     prompt: 'Reply with exactly: PROBE_OK',
     cwd: tmpdir(),
     command: 'codex',
@@ -28,16 +28,16 @@ test('a real app-server run carries the model and the effort', { skip: !live }, 
     reasoningEffort: 'xhigh',
     signal: new AbortController().signal,
   })
-  assert.match(text, /PROBE_OK/)
+  assert.match(outcome.text, /PROBE_OK/)
 })
 
 test('a real app-server run completes without either choice', { skip: !live }, async () => {
-  const text = await delegateOnce({
+  const outcome = await delegateOnce({
     prompt: 'Reply with exactly: DEFAULT_OK',
     cwd: tmpdir(),
     command: 'codex',
     permissionMode: 'never',
     signal: new AbortController().signal,
   })
-  assert.match(text, /DEFAULT_OK/)
+  assert.match(outcome.text, /DEFAULT_OK/)
 })
