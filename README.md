@@ -35,9 +35,11 @@ modelSelectionSettings: true ← requires a provider declaring `agentOptions`
                                 → enabling it throws while the preset mounts
 ```
 
-The Codex protocol supports both fields (`ThreadStartParams.reasoningEffort`,
-`TurnStartParams.effort`); the official provider never sends them. Reported
-upstream: <https://github.com/deepseek-ai/deepseek-harness/discussions/9115>
+The Codex protocol supports the choices this package exposes: `model` and the
+unattended permission policy on `thread/start`, model/cwd/permission overrides on
+`thread/resume` (0.165+), and `effort` per turn on `turn/start`. The official
+provider never sends them. Reported upstream:
+<https://github.com/deepseek-ai/deepseek-harness/discussions/9115>
 
 There is a second, separate defect: enabling `modelSelectionSettings: true` on a
 row whose provider is external (`codex-pro`) makes that row **silently**
@@ -53,17 +55,21 @@ Two layers, both under this package's control.
 `src/wire.ts` and `src/run.ts` are a port of the official app-server adapter —
 the initialize handshake, the ephemeral thread, thread/turn association
 including notifications that arrive before `turn/start` returns, unattended
-approval decisions, and terminal-answer selection by phase — with exactly two
+approval decisions, and terminal-answer selection by phase — with these
 additions:
 
 ```js
 // thread/start
-{ cwd, ephemeral, ...(model ? { model } : {}), reasoningEffort, ...THREAD_PERMISSION_PARAMS[mode] }
+{ cwd, ephemeral, ...(model ? { model } : {}), ...THREAD_PERMISSION_PARAMS[mode] }
+// thread/resume (0.165+)
+{ threadId, cwd, ...(model ? { model } : {}), ...THREAD_PERMISSION_PARAMS[mode] }
 // turn/start
-{ threadId, input: [...], effort }
+{ threadId, input: [...], effort, ...(outputSchema ? { outputSchema } : {}) }
 ```
 
-Neither literal appears anywhere in the official adapter's 871 lines. Two
+Neither literal appears anywhere in the official adapter's 871 lines. A thinking
+level is a `turn/start` field, not a `thread/start` field in 0.165/0.166; the
+thread-time default is left to Codex. Two
 mechanical differences from the source: the JSON-RPC transport is this package's
 own (`src/jsonrpc.ts`), and the app-server is started as
 `<command> app-server --stdio` from `PATH` rather than from `@openai/codex`'s
@@ -132,8 +138,9 @@ dsh plugin --profile desktop add link:/path/to/dsh-subagent-codex-pro
 ```sh
 npm install
 npm run typecheck
-npm test                                  # argv + tool-schema cases; live case skipped
-CODEX_SUBAGENT_LIVE=1 npm test            # also runs gpt-6-astra + xhigh for real
+npm test                                  # offline suite; live cases skip
+CODEX_SUBAGENT_LIVE=1 npm test            # extra real turn through the live Codex
+npm run test:coverage                     # Node's built-in coverage report
 ```
 
 The plugin logs every decision to `~/.dsh/codex-pro.log`:
@@ -144,12 +151,40 @@ decide … composed=standard header=standard -> skip
 serve …: subagent_codex registered (modelSelection=true, background=true, via=app-server)
 run: model=gpt-6-astra effort=xhigh cwd=… prompt=179B via=app-server
 run: published 3f2a…
-run done: text=8B
+run done: text=8B thread=… images=0 usage=complete(312 tokens) cleanup=confirmed config=true
+run config: requested={"cwd":"…","approvalPolicy":"never","sandbox":"read-only"} effective={"cwd":"…","approvalPolicy":"never","sandbox":"read-only"}
 ```
 
 A verified end-to-end run: 30 s wall clock, the model's `PROBE_OK` returned as
-the tool result. A real app-server run is also covered by the live test, which
-opens a thread with `reasoningEffort` and a turn with `effort`.
+the tool result. The live app-server test opens a thread and puts `effort` on the
+turn; it does **not** claim a thread-level thinking level, which 0.165/0.166 do
+not accept.
+
+## Verification layers
+
+This hardening distinguishes three layers rather than calling one of them
+"verified" for all:
+
+1. **Offline / hermetic** — the default `npm test` suite. It drives the real
+   protocol classes and a real child process through a scripted fake app-server:
+   startup hangs, turn hangs, caller cancel, early exit, resuming, usage replay,
+   duplicates, read-only permissions, structured verification, process-group
+   descendants, and idempotent teardown. No model is called and no Codex account
+   is touched.
+2. **Real Codex app-server** — the live app-server cases were run against the
+   installed Codex **0.165.0** with `CODEX_SUBAGENT_LIVE=1`:
+   `4/4` passed. They covered model + effort, the defaults, a persistent thread
+   resumed with explicit model/cwd/read-only overrides (including usage replay
+   and effective-config verification), and `output_schema` decoding. The
+   separate `codex exec` live case also passed (`20/20` in that file, one real
+   CLI call). The official **0.166.0** TypeScript schemas were reviewed for
+   `ThreadResumeParams`, `ThreadResumeResponse`, `ThreadTokenUsage`, and
+   `token_usage_replay.rs`, but no 0.166 runtime was executed. The plugin calls
+   the same `codex app-server --stdio` path.
+3. **Real DSH desktop end-to-end** — still not run. The implementation keeps
+   the existing DSH provider/tool/job contracts; a desktop smoke test remains
+   the one unexecuted layer. v0.7.0 is released through the repository's
+   tag-driven workflow; the user's global Codex login/config was not modified.
 
 ## Making the answer machine-readable
 
@@ -177,8 +212,16 @@ one present. The answer arrives as **text**, and that text is JSON.
 It is sent on the turn, not the thread: the same field on `thread/start` is accepted and silently ignored — the
 answer came back as prose. Measured both ways.
 
-A provider the harness drives (`thread-subagent`) can also be given a schema by its row, and this plugin now
-declares that capability and parses the answer so the caller receives `structured` as well as the text.
+A provider the harness drives (`thread-subagent`) can also be given a schema by its row, and this plugin
+declares that capability and verifies the answer before reporting `structured`. Verification is now
+**fail-closed**: invalid JSON, a non-object answer, a required/type/range violation, or a schema keyword this
+package cannot verify makes the run report an error/diagnostic instead of quietly omitting `structured`. The
+validator covers the object-rooted JSON Schema subset this tool accepts and rejects unsupported keywords rather
+than pretending they were checked.
+
+For a call carrying `output_schema`, the answer stays exactly the JSON text Codex returned. The persistent
+thread marker is **not** appended to machine-readable output; the thread id is reported separately and in the
+diagnostic log. Plain human-text answers keep the marker that makes a thread continuable.
 
 ## Showing Codex a picture
 
@@ -221,18 +264,21 @@ The path must be absolute, must exist, and must be a directory; anything else is
 the problem rather than a run that quietly happens somewhere unexpected. It is a working directory, not a
 sandbox boundary — what a run may touch is the permission mode's decision.
 
-**`cwd` decides the directory of a new thread; it never relocates an old one.** An explicit `thread_id` wins:
-the named thread is continued wherever it was created, and a `cwd` passed beside it changes the spawned
-process's directory but not the thread's. Measured on a real app-server — a thread created in `A`, resumed with
-`cwd: B` — the run still answered `CWD=/tmp/dsh-dirA-…` and still remembered what `A` had been told. So
-`thread_id` is the handle for "stop, ask me, then carry on", and it works with or without a `cwd`.
+**On 0.165, `thread/resume` accepts overrides, and this plugin actually sends them.** A resumed delegation
+sends the requested `cwd`, `model` (when one is chosen), and permission parameters, then compares the
+`thread/resume` response's effective `cwd`, `model`, `approvalPolicy`, `approvalsReviewer`, and `sandbox`
+with what was requested. A response that ignored an override is an error, not a silent fallback to the
+thread's history. This replaces the 0.164-era behaviour where `cwd` beside a `thread_id` did not relocate the
+thread: that is no longer the protocol this package targets.
 
-The plugin's own `threadMode: session` reuse is a different thing and does not combine with `cwd`: that reuse is
-the plugin's choice rather than a caller's, and it can only reuse a thread in the directory it belongs to. The
-log names the directory and the images every run used.
+For a **remembered** thread (`threadMode: session`, not an explicit `thread_id`), a resume that cannot apply
+the current configuration is treated as incompatible reuse: the plugin logs it and starts a fresh thread,
+under the same call deadline. For an **explicit** `thread_id`, the requested thread is the whole request, so an
+incompatible or refused resume is reported; it is never silently replaced by a different thread.
 
-Passing a `cwd` that does not match a resumed thread's is not an error and does nothing to the thread — worth
-knowing, because it looks like it should move the work.
+`reasoning_effort` remains a per-turn `turn/start` setting and still applies when the thread is resumed. The
+thread's historical default thinking level is visible in the resume response but is not restated by this
+package.
 
 ## Images
 
@@ -302,7 +348,7 @@ it simply serves no session. The `apply` line this plugin writes to `~/.dsh/code
 actually received, which is where to look:
 
 ```
-apply: v0.6.1 provider "codex-pro" registered … timeout=5400000ms; presets=["daily","heavy"]
+apply: v0.7.0 provider "codex-pro" registered … timeout=5400000ms; presets=["daily","heavy"]
                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
 ```
 
@@ -325,10 +371,23 @@ than a file.
 
 **A delegation that hangs is otherwise invisible.** The job stays `running`, the session waits, and nothing is
 logged — which is exactly what a stalled model request looks like from the outside. `runTimeoutMs` is the
-deadline for one whole delegation: when it passes, the run is cancelled, its child process is torn down, and the
-result says `codex-pro: the delegation exceeded its 600000 ms deadline and was cancelled` instead of nothing at
-all. The default is ten minutes, generous against a task class whose own documentation says "a minute or more";
-`0` restores the old behaviour of waiting forever.
+deadline for one whole delegation, and it covers **startup too**: `initialize`, `thread/start`/`thread/resume`,
+`thread/name/set`, and the turn all use one derived abort signal. When it passes, the run is cancelled, its
+process range is torn down under a separate bounded grace, and the result says
+`codex-pro: the delegation exceeded its 600000 ms deadline and was cancelled` instead of nothing at all. The
+default is ten minutes, generous against a task class whose own documentation says "a minute or more"; `0`
+restores the old behaviour of waiting forever.
+
+The timeout, a caller cancellation, a protocol failure, and an unexpected process exit are distinct failure
+categories. Settlement happens once; teardown is idempotent. A failed resume that is being repaired by a fresh
+thread shares the original absolute deadline, so the retry cannot borrow a second full timeout.
+
+**Cleanup is proven, not assumed.** On POSIX the app-server is the leader of its own process group. Teardown
+sends `SIGTERM` to the whole group, waits the configured grace (`disposeGraceMs`, default 3 s), then `SIGKILL`
+and polls until the group is gone. A descendant that outlives its parent is reported as
+`cleanup: { confirmed: false, detail: … }` rather than treated as cleaned; the custom tool turns an
+unconfirmed cleanup into an explicit failure. There is no global `killall codex`. On Windows the direct child is
+managed; process-range confirmation is a POSIX guarantee.
 
 | | |
 |---|---|
@@ -337,14 +396,18 @@ all. The default is ten minutes, generous against a task class whose own documen
 | `session` | One durable thread per Agent session, so ten delegations leave one thread and every call after the first continues the same conversation. |
 
 A call overrides the choice with `thread_mode`, and continues a thread of its own with `thread_id`. A persistent
-result ends with the thread's id:
+human-text result ends with the thread's id; a schema-constrained result stays pure JSON and reports the id
+separately:
 
 ```
 [codex thread 01a1212b-79cf-7241-8892-896094fad3d6 · persistent · pass it as thread_id to continue]
 ```
 
-Resuming ignores `model` and `reasoning_effort`: both are `thread/start` parameters, and a resumed thread keeps
-the ones it was created with. The per-turn `effort` still applies.
+Resuming **does not ignore the caller's choices on 0.165**: `model`, `cwd`, and `permission_mode` are sent as
+`thread/resume` overrides and compared against the response. `reasoning_effort` is a per-turn setting and still
+applies. A remembered thread with an incompatible configuration is replaced by a fresh thread; an explicit
+`thread_id` reports the incompatibility instead of continuing somewhere else. Machine-readable JSON does not
+get the thread marker described next.
 
 **Two things the app-server decides, both measured.** A thread with no turn yet is not resumable — it answers
 `no rollout found` — so a thread becomes continuable only after its first completed turn. And the Codex
@@ -366,6 +429,50 @@ continuing conversation, and `persistent` or `ephemeral` when delegations run at
 **Why it is worth more than convenience.** A resumed thread keeps the same prompt prefix, so the endpoint's
 cache keeps hitting. Measured on the Codex side, 93–99% of input tokens came from cache; the same work driven
 through a plan-usage route measured 0%, because that route refuses every cache control.
+
+## Permissions, including read-only review
+
+The permission mode is the plugin's unattended policy, not an approval prompt. The default is deliberately the
+write-capable mode needed for implementation work; this change does not alter it globally.
+
+| mode | Codex `approvalPolicy` | `sandbox` | use |
+|---|---|---|---|
+| `dangerously-bypass-approvals-and-sandbox` | `never` | `danger-full-access` | default implementation work |
+| `approve-for-me` | `on-request` | `workspace-write` | agent runs write-capable work with a reviewer for approvals |
+| `never` | `never` | omitted | no approval prompts, but **not read-only** |
+| `read-only` | `never` | `read-only` | review/inspection that must not write or execute |
+
+`approvalPolicy: 'never'` only means "do not ask a human"; it says nothing about the filesystem or execution
+sandbox. A real read-only Review mode therefore needs `sandbox: 'read-only'`, which the new `read-only` mode
+sends on both `thread/start` and `thread/resume`. The same modes are available as a per-call
+`permission_mode`, so a caller can review read-only while leaving the configured default write mode alone.
+The requested and effective permission facts are recorded in the run outcome and the diagnostic log; a
+response that ignored them fails unpublished.
+
+## Usage and rate limits
+
+Codex reports `thread/tokenUsage/updated` with a thread-cumulative `total` and a last-model-call `last`. A
+delegation can make several model calls, and `thread/resume` replays the latest persisted snapshot for the new
+connection. Treating that replay as current spending is wrong.
+
+The tracker folds notifications into one run report:
+
+- `run` is the delta from the observed baseline, never a sum of notification snapshots.
+- A pre-turn replay after resume becomes the baseline and contributes no run usage.
+- A resume with no replay before its first live snapshot is `partial`; the report never invents a zero.
+- Duplicate and out-of-order snapshots are ignored; a counter that moves backwards marks the report `partial`
+  rather than producing negative usage.
+- Usage from another thread/turn is not added.
+- No observation is `unknown` with no `run`, never a fake `0`; an observation that arrived before a failure,
+  timeout, or cancellation is retained in the failed outcome.
+- `cachedInputTokens` is a subset of `inputTokens` and `reasoningOutputTokens` is a subset of `outputTokens`;
+  the fields are reported as Codex states them and never added together.
+
+`account/rateLimits/updated` is stored separately as `rateLimits`; account limits are not token usage and are
+not merged into it. Both are exposed on `CodexRunOutcome` / `delegateOnce` results and written to the diagnostic
+log. The DSH `SubagentResult` and tool-result contracts have no `usage`/`rateLimits` field, so the provider and
+custom tool do not invent host fields; the tool result remains content-only, and the background job result
+remains the contract's string. The diagnostic log is the host-visible surface for this information.
 
 ## Background runs and progress
 
@@ -389,8 +496,13 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 | final message returned | ✅ |
 | images the run produced (screenshots, viewed files) | ✅ when the calling model route accepts images |
 | images handed to the run (`images`, absolute paths) | ✅ |
-| schema-enforced answer (`output_schema`, or the harness's row setting) | ✅ |
+| schema-enforced answer (`output_schema`, or the harness's row setting) | ✅ verified locally |
 | `run_in_background` + progress via `job_output` | ✅ |
+| read-only review permission (`read-only`) | ✅ `approvalPolicy=never` + `sandbox=read-only` |
+| token usage / model context window | ✅ internal outcome + diagnostic log; DSH result/tool/job contracts carry no usage field |
+| account rate limits | ✅ separate from token usage; internal/log only |
+| process-range cleanup with confirmation | ✅ POSIX; unconfirmed is reported |
+| deadline covers startup and turn; user cancel distinct | ✅ |
 | app-server protocol (handshake, thread lifecycle, approval decisions) | ✅ |
 | interactive approvals | by design none — a delegated run is unattended, as the official provider is |
 | continuable / thread reuse | ✅ `session` reuses one; `thread_id` continues any |

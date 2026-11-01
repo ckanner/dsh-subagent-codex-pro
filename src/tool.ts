@@ -18,6 +18,7 @@
  */
 
 import type { ToolDefinitionLike } from './dsh-types.ts'
+import type { CodexPermissionMode } from './wire.ts'
 
 /** One call's choices, already resolved against the configured defaults. */
 export interface CodexCall {
@@ -25,6 +26,8 @@ export interface CodexCall {
   readonly prompt: string
   readonly model?: string
   readonly reasoningEffort?: string
+  /** Per-call permission mode override, when the caller chose one. */
+  readonly permissionMode?: CodexPermissionMode
   /** How long this delegation's thread lives, when the call chose. */
   readonly threadMode?: 'ephemeral' | 'persistent'
   /** Continue this thread instead of creating one. */
@@ -116,8 +119,9 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
           + '` by default. Set `thread_mode: "persistent"` when the user wants to see, reopen, or continue this'
           + ' work in Codex itself — such a thread appears in the Codex application under this workspace and'
           + ' its id is reported with the result. Set `thread_mode: "ephemeral"` for a run that must leave no'
-          + ' trace. Pass `thread_id` to continue an earlier thread instead of starting one; that thread keeps'
-          + ' its original model and thinking level, so `model` and `reasoning_effort` are ignored then.'
+          + ' trace. Pass `thread_id` to continue an earlier thread instead of starting one; supplied'
+          + ' `model`, `cwd`, and `permission_mode` override that thread when present, and an explicit'
+          + ' thread id is never silently replaced by a different thread.'
         : ''),
     // A whole JSON Schema object: the harness rejects anything that is not
     // `type: "object"`.
@@ -159,7 +163,16 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
           description: 'Absolute path to run the delegation in. Defaults to this session\'s working'
             + ' directory. Use it when the work belongs somewhere else — a scratch directory the run may'
             + ' write into, for instance. The path must exist and be a directory. Naming one starts a fresh'
-            + ' Codex thread, because a thread belongs to the directory it was created in.',
+            + ' Codex thread unless an explicit `thread_id` is supplied, in which case it is applied as a'
+            + ' resume override.',
+        },
+        permission_mode: {
+          type: 'string',
+          enum: ['read-only', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox'],
+          description: 'Permission mode for this delegation. `read-only` is the safe Review mode:'
+            + ' approvalPolicy=never plus a read-only sandbox, so the run cannot write or execute'
+            + ' without an approval it never asks for. `never` alone is not read-only. Omit to use'
+            + ' the provider configuration; leave the configured write mode alone for implementation work.',
         },
         ...options.modelSelectionEnabled
           ? {
@@ -199,8 +212,9 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
               thread_id: {
                 type: 'string',
                 description: 'Continue an existing Codex thread instead of creating one. Pass the id a previous'
-                  + ' delegation reported. The thread keeps its original model and thinking level, so `model`'
-                  + ' and `reasoning_effort` are ignored for this call.',
+                  + ' delegation reported. Supplied `model`, `cwd`, and `permission_mode` are applied as'
+                  + ' resume overrides; `reasoning_effort` remains a per-turn setting. An explicit id always'
+                  + ' continues that thread: a failed resume is reported, never silently replaced.',
               },
             }
           : {},
@@ -275,6 +289,16 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         && !Array.isArray(request.output_schema)
         ? request.output_schema as Record<string, unknown>
         : undefined
+      const permissionMode = request.permission_mode === 'read-only'
+        || request.permission_mode === 'never'
+        || request.permission_mode === 'approve-for-me'
+        || request.permission_mode === 'dangerously-bypass-approvals-and-sandbox'
+        ? request.permission_mode as CodexPermissionMode
+        : undefined
+      if (request.permission_mode !== undefined && permissionMode === undefined) {
+        throw new Error('subagent_codex: permission_mode must be one of read-only, never, '
+          + 'approve-for-me, dangerously-bypass-approvals-and-sandbox')
+      }
       const images = Array.isArray(request.images)
         ? request.images.filter((value): value is string => typeof value === 'string' && value !== '')
         : undefined
@@ -289,6 +313,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         prompt,
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
+        ...(permissionMode === undefined ? {} : { permissionMode }),
         ...(threadMode === undefined ? {} : { threadMode }),
         ...(threadId === undefined ? {} : { threadId }),
         ...(cwd === undefined ? {} : { cwd }),

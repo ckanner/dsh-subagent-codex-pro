@@ -6,9 +6,10 @@
  * `@deepseek-ai/dsh-subagent-codex` declares `NO_START_CAPABILITIES`, so its
  * `tool-subagent` row cannot enable `modelSelectionSettings` — that requires a
  * provider declaring `agentOptions`, which the Codex provider does not. The
- * Codex protocol supports both fields (`ThreadStartParams.reasoningEffort`,
- * `TurnStartParams.effort`); the official adapter never sends them, and neither
- * literal appears anywhere in its 871 lines.
+ * Codex protocol supports the choices this package exposes: `model` on
+ * `thread/start`, per-turn `effort` on `turn/start`, and model/cwd/permission
+ * overrides on `thread/resume` (0.165+). The official adapter sends none of
+ * them; a thinking level is not a `thread/start` field in 0.165/0.166.
  *
  * Enabling the flag on a Codex row of our own provider was tried and did not
  * work: the row vanished with no tool and no error, while a control row — same
@@ -20,8 +21,9 @@
  * Two things, both under this package's control:
  *
  * 1. **Execution** is a port of the official app-server adapter (`wire.ts`,
- *    `run.ts`), with `reasoningEffort` added to `thread/start` and `effort` added
- *    to `turn/start`. That is the same protocol the official provider speaks,
+ *    `run.ts`), with `model` on `thread/start`, `effort` on `turn/start`, and
+ *    explicit model/cwd/permission overrides plus effective-config verification
+ *    on `thread/resume`. That is the same protocol the official provider speaks,
  *    including its initialize handshake, ephemeral thread, unattended approval
  *    decisions, and terminal-answer selection.
  * 2. **The tool** is registered on `agent/created` into that Agent's own context
@@ -306,27 +308,6 @@ function mediaTypeOf(path: string): string | undefined {
   return dot < 0 ? undefined : IMAGE_MEDIA_TYPES[path.slice(dot).toLowerCase()]
 }
 
-/**
- * The parsed answer of a run that was asked for a schema.
- *
- * Best effort by design: the app-server enforces the schema, so a reply that
- * still does not parse is the unexpected case, and dropping the text because of
- * it would throw away the only thing the delegation produced.
- *
- * @param outcome - the finished run.
- * @returns `structured` when the answer parsed, otherwise nothing.
- */
-function structuredOf(outcome: { readonly output: readonly { readonly type: 'text', readonly text: string }[] }):
-{ readonly structured?: unknown } {
-  const text = outcome.output.map((block) => block.text).join('\n\n').trim()
-  if (text === '') return {}
-  try {
-    return { structured: JSON.parse(text) as unknown }
-  } catch {
-    return {}
-  }
-}
-
 /** This package's own version, read once for the diagnostic line. */
 const PLUGIN_VERSION: string = (() => {
   try {
@@ -369,8 +350,14 @@ function promptText(prompt: SubagentStartRequestLike['prompt']): string {
     .join('\n\n')
 }
 
-/** One delegation to Codex, exposed as a provider the harness can start. */
-class CodexExecProvider implements SubagentProviderLike {
+/**
+ * One delegation to Codex, exposed as a provider the harness can start.
+ *
+ * Exported so the provider adapter can be exercised against the same fake
+ * app-server as the tool path; the plugin's `apply` is its only production
+ * constructor.
+ */
+export class CodexExecProvider implements SubagentProviderLike {
   readonly name: string
   readonly inheritsParentContext = false
 
@@ -430,25 +417,45 @@ class CodexExecProvider implements SubagentProviderLike {
         ? {}
         : { outputSchema: request.outputSchema as Record<string, unknown> }),
       env: this.resolved.env,
+      onProgress: (text) => { diag(`provider progress: ${text}`) },
     }
     diag(`provider start: model=${model ?? '<default>'} effort=${effort ?? '<default>'} cwd=${cwd} via=app-server`)
-    const run = await startCodexRun(request.prompt, spec, request.signal)
+    let run
+    try {
+      run = await startCodexRun(request.prompt, spec, request.signal)
+    } catch (error: unknown) {
+      diag(`provider start FAILED: ${error instanceof Error ? error.message : String(error)}`)
+      throw error
+    }
     diag(`provider start: published run ${run.id}`)
     return {
       id: run.id as SubagentRunLike['id'],
       localAgent: undefined,
-      result: run.result.then((outcome) => ({
-        output: outcome.output,
-        // The harness's own vocabulary has no `timeout`; its `aborted` is what a
-        // cancelled run is, and the diagnostic carries the reason either way.
-        stopReason: outcome.stopReason === 'timeout' ? 'aborted' : outcome.stopReason,
-        // A schema was asked for, so the answer is JSON; parse it for the caller
-        // that wanted structure rather than text to parse. Best effort: a reply
-        // that does not parse keeps its text and reports no structure.
-        ...(request.outputSchema === undefined ? {} : structuredOf(outcome)),
-        ...(outcome.diagnostic === undefined ? {} : { diagnostic: outcome.diagnostic }),
-      })),
-      dispose: () => run.teardown(),
+      result: run.result.then((outcome) => {
+        diag(`provider done: stop=${outcome.stopReason} thread=${outcome.threadId ?? '<none>'} `
+          + `usage=${outcome.usage.status}${outcome.usage.run === undefined ? '' : `(${String(outcome.usage.run.totalTokens)} tokens)`} `
+          + `cleanup=${outcome.cleanup.confirmed ? 'confirmed' : 'UNCONFIRMED'} `
+          + `rateLimits=${String(outcome.rateLimits.observations)} `
+          + `config=${outcome.configuration === undefined ? 'n/a' : String(outcome.configuration.matched)}`)
+        if (outcome.configuration !== undefined) {
+          diag(`provider config: requested=${JSON.stringify(outcome.configuration.requested)} `
+            + `effective=${JSON.stringify(outcome.configuration.effective)}`)
+        }
+        // `finish` already folds schema errors, cleanup warnings, and timeout /
+        // abort detail into `diagnostic`; do not append them twice.
+        const diagnostic = outcome.diagnostic ?? ''
+        return {
+          output: outcome.output,
+          // The harness's own vocabulary has no `timeout`; its `aborted` is what
+          // a cancelled run is, and the diagnostic carries the reason either way.
+          stopReason: outcome.stopReason === 'timeout' ? 'aborted' : outcome.stopReason,
+          ...(outcome.structured === undefined ? {} : { structured: outcome.structured }),
+          ...(diagnostic === '' ? {} : { diagnostic }),
+        }
+      }),
+      // The harness contract's dispose is void; the cleanup report is logged and
+      // carried by the run outcome instead.
+      dispose: () => run.teardown().then(() => undefined),
     }
   }
 }
@@ -570,12 +577,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       outcome: { readonly text: string; readonly threadId: string | undefined,
         readonly images?: readonly { readonly path?: string, readonly data?: string, readonly mimeType?: string }[] | undefined },
       mode: 'ephemeral' | 'persistent',
+      machineOutput: boolean,
     ): Promise<{
       readonly text: string
       readonly threadId: string | undefined
       readonly blocks?: readonly ContentBlockLike[] | undefined
     }> => {
-      const text = withThreadMarker(outcome, mode)
+      const text = withThreadMarker(outcome, mode, machineOutput)
       const images = outcome.images ?? []
       if (images.length === 0) return { text, threadId: outcome.threadId }
 
@@ -585,11 +593,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       const store = ctx.get('attachments') as AttachmentStoreLike | undefined
       if (store === undefined) {
         for (let i = 0; i < images.length; i += 1) notesFor('no attachment store is mounted')
-        return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
+        diag(`deliver: ${String(notes.length)} image(s) could not be attached (no store)`)
+        return { text: machineOutput ? text : `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
       }
       if (await shouldWithholdImages()) {
         for (let i = 0; i < images.length; i += 1) notesFor('this model route declares no image input')
-        return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
+        diag(`deliver: ${String(notes.length)} image(s) withheld from this model route`)
+        return { text: machineOutput ? text : `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
       }
 
       const payloads: { data: Buffer, mediaType: string }[] = []
@@ -611,19 +621,22 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
 
       if (payloads.length === 0) {
-        return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
+        diag(`deliver: ${String(notes.length)} image(s) could not be read`)
+        return { text: machineOutput ? text : `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
       }
       try {
         const refs = await store.saveImages(payloads)
+        const deliveredText = machineOutput ? text : withImageNote(text, images)
         const blocks: ContentBlockLike[] = [
-          { type: 'text', text: withImageNote(text, images) },
+          { type: 'text', text: deliveredText },
           ...refs.map((ref) => ({ type: 'image', attachment: ref })),
         ]
         diag(`deliver: ${String(refs.length)} image(s) attached to the delegation result`)
-        return { text: withImageNote(text, images), threadId: outcome.threadId, blocks }
+        return { text: deliveredText, threadId: outcome.threadId, blocks }
       } catch (error: unknown) {
         notesFor(`the attachment store refused them: ${String(error)}`.slice(0, 200))
-        return { text: `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
+        diag(`deliver: attachment store refused ${String(payloads.length)} image(s)`)
+        return { text: machineOutput ? text : `${text}\n\n${notes.join('\n')}`, threadId: outcome.threadId }
       }
     }
 
@@ -652,6 +665,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       readonly prompt: string
       readonly model?: string
       readonly reasoningEffort?: string
+      /** Per-call permission override; otherwise the provider configuration applies. */
+      readonly permissionMode?: CodexPermissionMode
       readonly threadMode?: 'ephemeral' | 'persistent'
       readonly threadId?: string
       readonly cwd?: string
@@ -708,6 +723,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       const runSchema = call.outputSchema === undefined
         ? undefined
         : checkedOutputSchema(call.outputSchema)
+      const callPermission = call.permissionMode ?? resolved.permissionMode
+      const timeoutMs = runTimeout ?? resolved.runTimeoutMs
+      // One absolute deadline for this call, shared by the auto-resume retry: a
+      // second attempt after a failed resume must not receive a fresh budget.
+      const deadlineAt = timeoutMs > 0 ? Date.now() + timeoutMs : undefined
+      const machineOutput = runSchema !== undefined
 
       // An explicit thread id wins; then an explicit mode; then the session's
       // remembered thread; then the configured default.
@@ -745,13 +766,14 @@ export function apply(ctx: Context, config: Config = {}): void {
           prompt: call.prompt,
           cwd: runCwd,
           command: resolved.command,
-          permissionMode: resolved.permissionMode,
+          permissionMode: callPermission,
           model: call.model,
           reasoningEffort: call.reasoningEffort,
           threadMode: mode,
           threadId: reuse,
           originator: resolved.originator,
-          runTimeoutMs: runTimeout ?? resolved.runTimeoutMs,
+          runTimeoutMs: timeoutMs,
+          ...(deadlineAt === undefined ? {} : { deadlineAt }),
           images: runImages,
           outputSchema: runSchema,
           threadName: threadNameFor(call.label),
@@ -764,8 +786,16 @@ export function apply(ctx: Context, config: Config = {}): void {
           sessionThread.set(String(agent.id), outcome.threadId)
         }
         diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'} `
-          + `images=${String(outcome.images?.length ?? 0)}`)
-        return await deliverResult(outcome, mode)
+          + `images=${String(outcome.images?.length ?? 0)} usage=${outcome.usage.status}`
+          + `${outcome.usage.run === undefined ? '' : `(${String(outcome.usage.run.totalTokens)} tokens)`} `
+          + `cleanup=${outcome.cleanup.confirmed ? 'confirmed' : 'UNCONFIRMED'} `
+          + `rateLimits=${String(outcome.rateLimits.observations)} `
+          + `config=${outcome.configuration === undefined ? 'n/a' : String(outcome.configuration.matched)}`)
+        if (outcome.configuration !== undefined) {
+          diag(`run config: requested=${JSON.stringify(outcome.configuration.requested)} `
+            + `effective=${JSON.stringify(outcome.configuration.effective)}`)
+        }
+        return await deliverResult(outcome, mode, machineOutput)
       } catch (error: unknown) {
         // A session's remembered thread can be gone — the user removed it, or the
         // Codex state moved. That is this plugin's own bookkeeping, so a fresh
@@ -780,19 +810,29 @@ export function apply(ctx: Context, config: Config = {}): void {
           && mode === 'persistent'
           && error instanceof CodexRunFailure
           && error.facts.stage === 'thread-resume'
+          // A protocol-level refusal or configuration mismatch is what a fresh
+          // thread repairs. A timeout, caller abort, or process failure is not:
+          // retrying those would muddy the reason the delegation stopped.
+          && error.facts.category === 'protocol'
         ) {
-          diag(`run: remembered thread ${reuse} could not be resumed (${String(error)}) - starting a new one`)
+          if (deadlineAt !== undefined && deadlineAt <= Date.now()) {
+            diag(`run: remembered thread ${reuse} could not be resumed and the call has no budget left; not retrying`)
+            throw error
+          }
+          diag(`run: remembered thread ${reuse} could not be resumed (${String(error)}) - starting a new one `
+            + `with ${deadlineAt === undefined ? 'no deadline' : `${String(deadlineAt - Date.now())}ms remaining`}`)
           sessionThread.delete(String(agent.id))
           const outcome = await delegateOnce({
             prompt: call.prompt,
             cwd: runCwd,
             command: resolved.command,
-            permissionMode: resolved.permissionMode,
+            permissionMode: callPermission,
             model: call.model,
             reasoningEffort: call.reasoningEffort,
             threadMode: mode,
             originator: resolved.originator,
-            runTimeoutMs: runTimeout ?? resolved.runTimeoutMs,
+            runTimeoutMs: timeoutMs,
+            ...(deadlineAt === undefined ? {} : { deadlineAt }),
             images: runImages,
             outputSchema: runSchema,
             threadName: threadNameFor(call.label),
@@ -803,8 +843,9 @@ export function apply(ctx: Context, config: Config = {}): void {
           })
           if (outcome.threadId !== undefined) sessionThread.set(String(agent.id), outcome.threadId)
           diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'} `
-            + `images=${String(outcome.images?.length ?? 0)}`)
-          return await deliverResult(outcome, mode)
+            + `images=${String(outcome.images?.length ?? 0)} usage=${outcome.usage.status} `
+            + `cleanup=${outcome.cleanup.confirmed ? 'confirmed' : 'UNCONFIRMED'}`)
+          return await deliverResult(outcome, mode, machineOutput)
         }
         throw error
       } finally {
@@ -878,22 +919,23 @@ export function apply(ctx: Context, config: Config = {}): void {
 }
 
 /**
- * Append the thread marker to a completed delegation's text.
+ * Append the thread marker to a human-text delegation result.
  *
- * The id is carried in the text rather than in a richer tool result so that the
- * answer stays the plain final message the model already reads, while the one
- * fact a follow-up call needs is still in front of it. Appending here rather
- * than in the tool means a background job's collected result carries it too.
+ * A machine-readable answer (one carrying `output_schema`) must stay valid JSON:
+ * appending a marker would make the whole result unparseable. Such a run keeps
+ * its thread id in the result envelope/diagnostic log instead of in the text.
  *
  * @param outcome - the finished run.
  * @param mode - the thread mode the run used.
+ * @param machineOutput - whether the answer is schema-constrained JSON.
  * @returns the text to report.
  */
-function withThreadMarker(
+export function withThreadMarker(
   outcome: { readonly text: string; readonly threadId: string | undefined },
   mode: 'ephemeral' | 'persistent',
+  machineOutput: boolean,
 ): string {
-  if (mode === 'ephemeral' || outcome.threadId === undefined) return outcome.text
+  if (machineOutput || mode === 'ephemeral' || outcome.threadId === undefined) return outcome.text
   return `${outcome.text}\n\n[codex thread ${outcome.threadId} · persistent · pass it as thread_id to continue]`
 }
 

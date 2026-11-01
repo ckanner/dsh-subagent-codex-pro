@@ -1,11 +1,13 @@
 /**
  * Codex app-server protocol adapter.
  *
- * A faithful port of `@deepseek-ai/dsh-subagent-codex`'s wire module, with one
- * substantive addition: it can send a **reasoning effort**. That is the whole
- * reason this package exists. The Codex protocol accepts `reasoningEffort` on
- * `thread/start` and `effort` on `turn/start`; the official adapter sends
- * neither, and the two literals do not appear anywhere in its 871 lines.
+ * A faithful port of `@deepseek-ai/dsh-subagent-codex`'s wire module, extended
+ * with the per-call choices this package exists for: `model` and the unattended
+ * permission policy on `thread/start`, per-turn `effort` on `turn/start`, and
+ * explicit model/cwd/permission overrides plus effective-configuration checks
+ * on `thread/resume` (0.165+). A thinking level is **not** a `thread/start`
+ * field in 0.165/0.166. The module also accounts for token usage and account
+ * rate limits, keeping them separate.
  *
  * Everything else is carried over as-is, because the surrounding behaviour is
  * load-bearing and was tuned against a real app-server: the initialize
@@ -18,19 +20,26 @@
  *   transport method shape is `request(method, params, { signal })` rather than
  *   a positional signal.
  * - Error text uses this package's prefix.
- * - `reasoningEffort` is threaded through the constructor, and `effort` through
- *   `runTurn`.
+ * - Model and permission choices are constructor state; `effort` travels through
+ *   `runTurn`; resume overrides are per call.
  *
  * @module dsh-subagent-codex-pro/wire
  */
 
+import { resolve } from 'node:path'
+
 import type { LineTransport } from './jsonrpc.ts'
+import { TokenUsageTracker, type CodexUsageReport, type TokenUsageNotificationLike } from './usage.ts'
 
 /** Prefix on every error this module raises. */
 const P = 'codex-pro'
 
 /** Thread permission params per configured mode; copied verbatim. */
 const THREAD_PERMISSION_PARAMS = {
+  'read-only': {
+    approvalPolicy: 'never',
+    sandbox: 'read-only',
+  },
   never: { approvalPolicy: 'never' },
   'approve-for-me': {
     approvalPolicy: 'on-request',
@@ -43,8 +52,54 @@ const THREAD_PERMISSION_PARAMS = {
   },
 } as const
 
+/** The permission params one mode sends to thread/start and thread/resume. */
+export type CodexPermissionParams = (typeof THREAD_PERMISSION_PARAMS)[CodexPermissionMode]
+
 /** The configured permission mode. */
 export type CodexPermissionMode = keyof typeof THREAD_PERMISSION_PARAMS
+
+/** The model/cwd/permission facts a start or resume request asked for. */
+export interface RequestedConfiguration {
+  readonly model?: string
+  readonly cwd?: string
+  readonly approvalPolicy?: string
+  readonly approvalsReviewer?: string
+  readonly sandbox?: string
+}
+
+/** The facts the app-server reports after applying a start or resume request. */
+export interface EffectiveConfiguration {
+  readonly model?: string
+  readonly cwd?: string
+  readonly approvalPolicy?: string
+  readonly approvalsReviewer?: string
+  readonly sandbox?: string
+  readonly reasoningEffort?: string | null
+}
+
+/** One path's requested/effective facts, kept for observability and comparison. */
+export interface AppliedConfiguration {
+  readonly requested: RequestedConfiguration
+  readonly effective: EffectiveConfiguration
+  readonly matched: boolean
+}
+
+/** Overrides sent on `thread/resume` instead of silently preserving history. */
+export interface CodexResumeOverrides {
+  /** Model override, when the caller/configuration supplied one. */
+  readonly model?: string
+  /** Working directory override applied to the resumed thread. */
+  readonly cwd?: string
+  /** Permission mode override. Omitted means preserve the thread's history. */
+  readonly permission?: CodexPermissionMode
+}
+
+/** The rate-limit snapshot Codex sends separately from token usage. */
+export interface CodexRateLimitsReport {
+  readonly observations: number
+  /** Latest `rateLimits` object, exactly as reported. */
+  readonly latest?: Record<string, unknown>
+}
 
 /**
  * One image the run produced.
@@ -271,8 +326,6 @@ export interface CodexWireOptions {
   readonly permissionMode: CodexPermissionMode
   /** Model for `thread/start`, when the caller chose one. */
   readonly model?: string | undefined
-  /** Default thinking level for `thread/start`, when the caller chose one. */
-  readonly reasoningEffort?: string | undefined
   /** How long the thread lives. Defaults to `ephemeral`. */
   readonly threadMode?: CodexThreadMode | undefined
   /**
@@ -289,6 +342,91 @@ export interface CodexWireOptions {
 /** The originator the Codex desktop client lists. */
 export const DEFAULT_ORIGINATOR = 'Codex Desktop'
 
+/** The subset of a permission mode that thread requests actually send. */
+function requestedPermission(permission: CodexPermissionParams): Partial<RequestedConfiguration> {
+  return {
+    approvalPolicy: permission.approvalPolicy,
+    ...'approvalsReviewer' in permission ? { approvalsReviewer: permission.approvalsReviewer } : {},
+    ...'sandbox' in permission ? { sandbox: permission.sandbox } : {},
+  }
+}
+
+/** Map the app-server's sandbox policy object back to the request's mode name. */
+function sandboxModeOf(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const type = (value as Record0).type
+  switch (type) {
+    case 'readOnly': return 'read-only'
+    case 'workspaceWrite': return 'workspace-write'
+    case 'dangerFullAccess': return 'danger-full-access'
+    case 'externalSandbox': return 'external-sandbox'
+    default: return undefined
+  }
+}
+
+/** Read the effective configuration fields a start/resume response carries. */
+function effectiveConfiguration(response: Record0): EffectiveConfiguration {
+  const text = (field: string): string | undefined =>
+    typeof response[field] === 'string' ? response[field] as string : undefined
+  const model = text('model')
+  const cwd = text('cwd')
+  const approvalPolicy = text('approvalPolicy')
+  const approvalsReviewer = text('approvalsReviewer')
+  const sandbox = sandboxModeOf(response.sandbox)
+  const reasoningEffort = response.reasoningEffort
+  return {
+    ...model === undefined ? {} : { model },
+    ...cwd === undefined ? {} : { cwd },
+    ...approvalPolicy === undefined ? {} : { approvalPolicy },
+    ...approvalsReviewer === undefined ? {} : { approvalsReviewer },
+    ...sandbox === undefined ? {} : { sandbox },
+    ...reasoningEffort === null || typeof reasoningEffort === 'string'
+      ? { reasoningEffort: reasoningEffort as string | null }
+      : {},
+  }
+}
+
+/**
+ * Compare requested facts with the effective ones and retain both.
+ *
+ * Missing response fields cannot prove anything; they set `matched` false but
+ * are not reported as a mismatch. A present, different value is a real
+ * mismatch: returning the caller's request as if it had taken effect is exactly
+ * the failure mode this guard exists to prevent. The caller stores the report
+ * before throwing, so a rejected resume still says what was asked for and what
+ * the app-server answered.
+ */
+function appliedConfiguration(
+  requested: RequestedConfiguration,
+  response: Record0,
+): { readonly configuration: AppliedConfiguration, readonly mismatches: readonly string[] } {
+  const effective = effectiveConfiguration(response)
+  const mismatches: string[] = []
+  const equals = (field: keyof RequestedConfiguration, actual: string, requestedValue: string): boolean =>
+    field === 'cwd' ? resolve(actual) === resolve(requestedValue) : actual === requestedValue
+  const compare = (field: keyof RequestedConfiguration, requestedValue: string | undefined): boolean => {
+    if (requestedValue === undefined) return true
+    const actual = effective[field]
+    if (actual === undefined) return false
+    if (!equals(field, actual, requestedValue)) {
+      mismatches.push(`${field} ${String(actual)} != ${requestedValue}`)
+      return false
+    }
+    return true
+  }
+  const verified = [
+    compare('model', requested.model),
+    compare('cwd', requested.cwd),
+    compare('approvalPolicy', requested.approvalPolicy),
+    compare('approvalsReviewer', requested.approvalsReviewer),
+    compare('sandbox', requested.sandbox),
+  ]
+  return {
+    configuration: { requested, effective, matched: verified.every(Boolean) && mismatches.length === 0 },
+    mismatches,
+  }
+}
+
 /**
  * One app-server connection and its single ephemeral thread/turn.
  *
@@ -300,8 +438,6 @@ export class CodexAppServerWire {
   #threadMode: CodexThreadMode
   #originator: string
   #model: string | undefined
-  /** Sent as `thread/start`'s `reasoningEffort`. Absent from the official adapter. */
-  #reasoningEffort: string | undefined
   #transport: LineTransport
   #fatal = Promise.withResolvers<never>()
   #threadId: string | undefined
@@ -309,6 +445,8 @@ export class CodexAppServerWire {
   #pendingTurnId: string | undefined
   #turnCompleted: { promise: Promise<TurnCompletion>; resolve: (value: TurnCompletion) => void } | undefined
   #earlyTurnNotifications: { method: string; params: unknown; order: number }[] = []
+  /** Usage notifications that arrived before thread/start or thread/resume returned. */
+  #earlyUsageNotifications: TokenUsageNotificationLike[] = []
   #lastFinalAnswer: string | undefined
   /** Stable partial answer text that later assistant output or tool calls may follow. */
   #lastPartialAnswer: string | undefined
@@ -323,6 +461,13 @@ export class CodexAppServerWire {
   #inputEnded = false
   #terminalObserved = false
   #closed = false
+  /** Token usage folds cumulative snapshots and replays into one run report. */
+  readonly #usage = new TokenUsageTracker()
+  /** The last rate-limit snapshot, kept separately from token usage. */
+  #rateLimits: Record<string, unknown> | undefined
+  #rateLimitObservations = 0
+  /** Requested/effective facts of the one start or resume this wire performed. */
+  #configuration: AppliedConfiguration | undefined
   /** Narrates notable events, for a caller that reports progress. */
   #onProgress: ((text: string) => void) | undefined
 
@@ -334,7 +479,6 @@ export class CodexAppServerWire {
   ) {
     this.#permissionMode = options.permissionMode
     this.#model = options.model
-    this.#reasoningEffort = options.reasoningEffort
     this.#threadMode = options.threadMode ?? 'ephemeral'
     this.#originator = options.originator ?? DEFAULT_ORIGINATOR
     this.#transport = transport
@@ -414,22 +558,22 @@ export class CodexAppServerWire {
    * @param signal - cancellation for an unpublished start.
    */
   async startThread(cwd: string, signal?: AbortSignal): Promise<void> {
-    const thread = object(
-      object(
-        await this.#guarded(this.#transport.request('thread/start', {
-          cwd,
-          ephemeral: this.#threadMode === 'ephemeral',
-          ...this.#model === undefined ? {} : { model: this.#model },
-          // ── this package's addition ────────────────────────────────────────
-          // The model's default thinking level for the thread. The official
-          // adapter never sends this field.
-          ...this.#reasoningEffort === undefined ? {} : { reasoningEffort: this.#reasoningEffort },
-          ...THREAD_PERMISSION_PARAMS[this.#permissionMode],
-        }, { signal }), signal),
-        'thread/start response',
-      ).thread,
-      'thread/start thread',
+    const permission = THREAD_PERMISSION_PARAMS[this.#permissionMode]
+    const requested: RequestedConfiguration = {
+      cwd,
+      ...(this.#model === undefined ? {} : { model: this.#model }),
+      ...requestedPermission(permission),
+    }
+    const response = object(
+      await this.#guarded(this.#transport.request('thread/start', {
+        cwd,
+        ephemeral: this.#threadMode === 'ephemeral',
+        ...this.#model === undefined ? {} : { model: this.#model },
+        ...permission,
+      }, { signal }), signal),
+      'thread/start response',
     )
+    const thread = object(response.thread, 'thread/start thread')
     const id = string(thread.id, 'thread/start thread id')
     const ephemeral = thread.ephemeral === true
     if (ephemeral !== (this.#threadMode === 'ephemeral')) {
@@ -437,27 +581,55 @@ export class CodexAppServerWire {
         + `where ${this.#threadMode} was asked for`)
     }
     this.#threadId = id
-    this.#progress(`thread ${id} (${this.#threadMode})`)
+    this.#usage.resetForNewThread()
+    this.#flushEarlyUsage()
+    const applied = appliedConfiguration(requested, response)
+    this.#configuration = applied.configuration
+    this.#progress(`thread ${id} (${this.#threadMode}) configuration `
+      + `${JSON.stringify(applied.configuration.requested)} -> ${JSON.stringify(applied.configuration.effective)}`)
+    if (applied.mismatches.length > 0) {
+      throw new Error(`${P}: thread/start did not apply the requested configuration: `
+        + applied.mismatches.join('; '))
+    }
   }
 
   /**
    * Continue an existing thread instead of creating one.
    *
-   * The thread keeps the model and thinking level it was created with: both are
-   * `thread/start` parameters, so there is nothing to send here, and sending
-   * them would contradict the thread the user asked to continue. A per-turn
-   * effort still works through `runTurn`.
+   * Codex 0.165+ accepts configuration overrides on `thread/resume`. Parameters
+   * that are present replace the thread's historical values; absent parameters
+   * leave history alone. The response is compared with the requested facts so a
+   * caller never mistakes a requested model, cwd, or permission policy for an
+   * effective one.
    *
    * The app-server refuses a thread with no rollout yet, so a thread becomes
    * resumable only after it has carried one turn.
    *
    * @param threadId - the thread to continue, as a previous run reported it.
+   * @param overrides - explicit model/cwd/permission facts to apply.
    * @param signal - cancellation for an unpublished resume.
    */
-  async resumeThread(threadId: string, signal?: AbortSignal): Promise<void> {
+  async resumeThread(
+    threadId: string,
+    overrides: CodexResumeOverrides = {},
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const permission = overrides.permission === undefined
+      ? undefined
+      : THREAD_PERMISSION_PARAMS[overrides.permission]
+    const requested: RequestedConfiguration = {
+      ...(overrides.cwd === undefined ? {} : { cwd: overrides.cwd }),
+      ...(overrides.model === undefined ? {} : { model: overrides.model }),
+      ...(permission === undefined ? {} : requestedPermission(permission)),
+    }
     const response = object(
       await this.#guarded(
-        this.#transport.request('thread/resume', { threadId }, { signal }),
+        this.#transport.request('thread/resume', {
+          threadId,
+          ...(overrides.cwd === undefined ? {} : { cwd: overrides.cwd }),
+          ...(overrides.model === undefined ? {} : { model: overrides.model }),
+          ...(permission ?? {}),
+        }, { signal }),
         signal,
       ),
       'thread/resume response',
@@ -470,7 +642,16 @@ export class CodexAppServerWire {
       if (id !== threadId) throw new Error(`${P}: thread/resume answered for ${id}, not ${threadId}`)
     }
     this.#threadId = threadId
-    this.#progress(`thread ${threadId} (resumed)`)
+    this.#usage.resetForResume()
+    this.#flushEarlyUsage()
+    const applied = appliedConfiguration(requested, response)
+    this.#configuration = applied.configuration
+    this.#progress(`thread ${threadId} (resumed) configuration `
+      + `${JSON.stringify(applied.configuration.requested)} -> ${JSON.stringify(applied.configuration.effective)}`)
+    if (applied.mismatches.length > 0) {
+      throw new Error(`${P}: thread/resume did not apply the requested configuration: `
+        + applied.mismatches.join('; '))
+    }
   }
 
   /**
@@ -496,7 +677,10 @@ export class CodexAppServerWire {
       )
       this.#progress(`thread ${this.#threadId} named ${JSON.stringify(name)}`)
       return true
-    } catch {
+    } catch (error) {
+      // Naming is best effort, but a deadline/caller abort is not: swallowing
+      // it would let a timed-out startup publish a run after its budget.
+      if (signal?.aborted === true) throw error
       return false
     }
   }
@@ -544,6 +728,24 @@ export class CodexAppServerWire {
     return this.#threadId
   }
 
+  /** Token usage attributable to this one delegation; never a zero guess. */
+  get usageReport(): CodexUsageReport {
+    return this.#usage.report()
+  }
+
+  /** Account rate limits, kept separate from token usage. */
+  get rateLimitsReport(): CodexRateLimitsReport {
+    return {
+      observations: this.#rateLimitObservations,
+      ...(this.#rateLimits === undefined ? {} : { latest: this.#rateLimits }),
+    }
+  }
+
+  /** The requested and effective configuration of the one start/resume. */
+  get configuration(): AppliedConfiguration | undefined {
+    return this.#configuration
+  }
+
   /**
    * Submit the one text-only task and wait for this thread/turn's terminal
    * notification.
@@ -588,6 +790,7 @@ export class CodexAppServerWire {
         'turn/start turn',
       )
       this.#commitTurnId(string(turn.id, 'turn/start turn id'))
+      this.#usage.beginTurn(string(turn.id, 'turn/start turn id'))
     } catch (error: unknown) {
       this.#recordFailure({ stage: 'turn-start', category: 'unknown' })
       throw error
@@ -622,6 +825,11 @@ export class CodexAppServerWire {
     return { output, stopReason: 'completed', images: this.images }
   }
 
+  /** The best non-commentary answer observed so far, preserving exact bytes. */
+  get partialOutput(): readonly { readonly type: 'text', readonly text: string }[] {
+    return this.#collectOutput()
+  }
+
   /**
    * Best-effort remote cancellation. Local settlement and process teardown stay
    * authoritative when the child no longer accepts protocol requests.
@@ -645,6 +853,7 @@ export class CodexAppServerWire {
   close(): void {
     if (this.#closed) return
     this.#closed = true
+    this.#usage.close()
     this.#transport.dispose(new Error(`${P}: app-server connection closed`))
   }
 
@@ -791,9 +1000,53 @@ export class CodexAppServerWire {
     }
   }
 
+  /** Replay usage notifications that raced the start/resume response. */
+  #flushEarlyUsage(): void {
+    if (this.#threadId === undefined) return
+    const pending = this.#earlyUsageNotifications.splice(0)
+    for (const notification of pending) {
+      if (notification.threadId !== this.#threadId) continue
+      const tokenUsage = notification.tokenUsage
+      if (typeof tokenUsage !== 'object' || tokenUsage === null || Array.isArray(tokenUsage)) {
+        this.#usage.observeInvalid()
+        continue
+      }
+      this.#usage.observe(notification)
+    }
+  }
+
   /** Route one notification, buffering anything that precedes the turn id. */
   #handleNotification(method: string, params: unknown, order?: number): void {
     const fields = (params ?? {}) as Record0
+    if (method === 'thread/tokenUsage/updated') {
+      if (this.#threadId === undefined) {
+        this.#earlyUsageNotifications.push({
+          threadId: fields.threadId,
+          turnId: fields.turnId,
+          tokenUsage: fields.tokenUsage,
+        })
+        return
+      }
+      if (typeof fields.threadId !== 'string' || fields.threadId !== this.#threadId) return
+      const tokenUsage = fields.tokenUsage
+      if (typeof tokenUsage !== 'object' || tokenUsage === null || Array.isArray(tokenUsage)) {
+        this.#usage.observeInvalid()
+        return
+      }
+      this.#usage.observe({
+        threadId: fields.threadId,
+        turnId: fields.turnId,
+        tokenUsage,
+      })
+      return
+    }
+    if (method === 'account/rateLimits/updated') {
+      const rateLimits = fields.rateLimits
+      if (typeof rateLimits !== 'object' || rateLimits === null || Array.isArray(rateLimits)) return
+      this.#rateLimits = rateLimits as Record<string, unknown>
+      this.#rateLimitObservations += 1
+      return
+    }
     if (method === 'turn/started') {
       if (string(fields.threadId, 'turn/started thread id') !== this.#threadId) return
       const turn = object(fields.turn, 'turn/started turn')

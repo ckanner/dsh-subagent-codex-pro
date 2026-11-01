@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.7.0
+
+Adapter reliability and observability hardening. Released 2026-11-01. The
+user's global Codex login/config is untouched.
+
+- **One deadline for the whole delegation.** A single derived abort signal now
+  covers `initialize`, `thread/start`/`thread/resume`, `thread/name/set`, and the
+  turn. Startup hangs can no longer outlive `runTimeoutMs`; `0` still disables
+  the deadline. Timeout, caller cancellation, protocol failure, and process exit
+  are classified distinctly, settlement occurs once, and teardown is idempotent.
+  An auto-resume retry inherits the original absolute deadline instead of a
+  fresh full timeout.
+- **Resume applies requested configuration.** On the 0.165 protocol,
+  `thread/resume` sends explicit model, cwd, and permission overrides and checks
+  the response's effective `model`, `cwd`, `approvalPolicy`, `approvalsReviewer`,
+  and `sandbox`. A mismatch fails an explicit resume; a remembered session
+  thread with incompatible configuration is replaced by a new thread under the
+  same deadline. `thread/start` no longer sends `reasoningEffort`, which is not
+  in the 0.165/0.166 start parameters; thinking remains a per-turn `effort`.
+- **Read-only review mode.** Added `read-only` (`approvalPolicy: never`,
+  `sandbox: read-only`), available in configuration and per-call as
+  `permission_mode`. `never` remains only "do not prompt"; the default
+  write-capable mode is unchanged.
+- **Token usage and rate limits.** `thread/tokenUsage/updated` is folded from
+  thread-cumulative snapshots into a run delta: resume replays are baselines,
+  duplicates/out-of-order snapshots never add, missing baselines are `unknown`
+  rather than zero, and observed usage survives failure/timeout/cancel.
+  `account/rateLimits/updated` is stored separately from token usage and is
+  never merged into it.
+- **Result envelope separated.** Final text, structured result, thread id,
+  usage, configuration, diagnostics, cleanup, and schema errors are distinct
+  fields on the internal outcome. A schema-constrained answer stays pure JSON:
+  the persistent-thread marker is not appended to it, and parse/schema
+  verification is fail-closed. The DSH provider/tool/job contracts are
+  unchanged; they carry no usage field, so usage/rate limits are reported in
+  the outcome and diagnostic log rather than invented host fields.
+- **Provable process cleanup.** POSIX children are process-group leaders;
+  teardown signals the group, escalates to `SIGKILL` after a separate grace, and
+  verifies the group is gone. Unconfirmed cleanup is reported, including for
+  descendants that ignore `SIGTERM`; there is no global `killall`.
+- **Tests and docs.** Added fake-app-server lifecycle tests, usage-accounting
+  tests, structured-verification tests, resume-override tests, result-marker
+  tests, and permission-forwarding tests. Updated README and Chinese README to
+  match the 0.165 baseline and to separate offline, real-Codex, and real-DSH
+  desktop validation. Validation baseline: installed Codex 0.165.0; live
+  app-server cases 4/4 passed and the `codex exec` live case passed; official
+  0.166.0 schemas reviewed, no 0.166 runtime executed; real DSH desktop smoke
+  still not run.
+
 ## 0.6.4
 
 Tests only; the shipped runtime is unchanged.

@@ -1,14 +1,16 @@
 /**
  * One-shot Codex child lifecycle over the real app-server.
  *
- * Ported from `@deepseek-ai/dsh-subagent-codex`'s run module. The harness's
- * subprocess seam is replaced with `node:child_process` plus an explicit
- * termination ladder, and the result is settled here rather than through the
- * harness's `settleRunResult`, so this package stays dependency-free.
+ * The run has one deadline from before startup through the terminal turn. Every
+ * startup RPC (initialize, thread/start, thread/resume, thread/name/set) and the
+ * turn use the same derived abort signal, so a server that stops answering
+ * cannot keep a delegation alive past its budget. Cleanup is a separate, finite
+ * grace: the deadline ends work, the grace ends the process range.
  *
- * The app-server is started from the configured executable on `PATH` rather than
- * from `@openai/codex`'s manifest, which removes a resolution dependency the
- * official adapter carries.
+ * The child is spawned as the leader of its own POSIX process group. Termination
+ * targets the group and then proves it is gone; a descendant that ignores
+ * SIGTERM or outlives its parent is reported instead of being silently assumed
+ * dead.
  *
  * @module dsh-subagent-codex-pro/run
  */
@@ -17,14 +19,35 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { LineTransport, type JsonRpcMessage } from './jsonrpc.ts'
-import { CodexAppServerWire, DEFAULT_ORIGINATOR, type CodexPermissionMode, type CodexStopReason } from './wire.ts'
+import { verifyStructuredOutput } from './structured.ts'
+import {
+  CodexAppServerWire,
+  DEFAULT_ORIGINATOR,
+  type AppliedConfiguration,
+  type CodexPermissionMode,
+  type CodexRateLimitsReport,
+  type CodexResumeOverrides,
+  type CodexStopReason,
+} from './wire.ts'
 import type { CodexImage, CodexThreadMode } from './wire.ts'
+import type { CodexUsageReport } from './usage.ts'
 
 /** Default grace between termination tiers. */
 const DEFAULT_DISPOSE_GRACE_MS = 3_000
 
+/** Hard upper bound on observing a process group disappear after SIGKILL. */
+const GROUP_REAP_TIMEOUT_MS = 2_000
+
 /** The task text blocks a run accepts. */
 export type PromptBlocks = readonly { readonly type: string; readonly text?: string }[]
+
+/** What happened to the process range at cleanup. */
+export interface CleanupReport {
+  /** Whether the whole owned process group is confirmed gone. */
+  readonly confirmed: boolean
+  /** Why confirmation was impossible, when it was. */
+  readonly detail?: string
+}
 
 /** Everything one run needs that does not change between attempts. */
 export interface CodexRunSpec {
@@ -34,12 +57,18 @@ export interface CodexRunSpec {
   readonly command: string
   /** Unattended permission policy. */
   readonly permissionMode: CodexPermissionMode
-  /** Model for `thread/start`, when the caller chose one. */
+  /** Model requested for this run, when one was chosen. */
   readonly model?: string | undefined
-  /** Default thinking level for `thread/start`, when the caller chose one. */
-  readonly reasoningEffort?: string | undefined
-  /** Per-turn thinking level for `turn/start`, when the caller chose one. */
+  /**
+   * Per-turn thinking level.
+   *
+   * Codex carries a thinking level on `turn/start`, not on `thread/start`; the
+   * latter is not part of the 0.165/0.166 start parameters. `effort` wins when
+   * both are supplied.
+   */
   readonly effort?: string | undefined
+  /** Backwards-compatible alias for `effort`; never sent as a thread default. */
+  readonly reasoningEffort?: string | undefined
   /** How long the thread lives. Defaults to `ephemeral`. */
   readonly threadMode?: CodexThreadMode | undefined
   /**
@@ -58,6 +87,13 @@ export interface CodexRunSpec {
    */
   readonly runTimeoutMs?: number | undefined
   /**
+   * Absolute deadline shared by an auto-resume retry.
+   *
+   * Internal: the caller computes this once and passes it to both attempts, so
+   * creating a new thread after a failed resume cannot borrow a fresh timeout.
+   */
+  readonly deadlineAt?: number | undefined
+  /**
    * Absolute paths of images to put in front of Codex with the task.
    *
    * The app-server takes these as `localImage` blocks, so the picture reaches the
@@ -68,8 +104,7 @@ export interface CodexRunSpec {
    * A JSON Schema for the final answer.
    *
    * The app-server enforces it, so the answer arrives as JSON that conforms
-   * instead of prose a caller has to parse and hope about. Sent on the turn: the
-   * same field on `thread/start` is accepted and ignored.
+   * instead of prose a caller has to parse and hope about. Sent on the turn.
    */
   readonly outputSchema?: Record<string, unknown> | undefined
   /**
@@ -107,26 +142,38 @@ export interface CodexRunOutcome {
    * still a screenshot the user asked for.
    */
   readonly images?: readonly CodexImage[] | undefined
+  /** Token usage attributable to this run; `unknown` rather than zero when absent. */
+  readonly usage: CodexUsageReport
+  /** Account rate limits, deliberately separate from token usage. */
+  readonly rateLimits: CodexRateLimitsReport
+  /** Requested vs effective model/cwd/permission facts, when startup got that far. */
+  readonly configuration?: AppliedConfiguration | undefined
+  /** Whether the process range is confirmed gone. */
+  readonly cleanup: CleanupReport
+  /** Parsed structured result, only when a schema was supplied and verification passed. */
+  readonly structured?: unknown
+  /** Why structured verification failed, when it did. */
+  readonly schemaError?: string
 }
 
 /** The published run. */
 export interface StartedCodexRun {
   /** A durable id for the harness's catalog. */
   readonly id: string
-  /** Never rejects: a failure arrives as `stopReason: 'error'` plus a diagnostic. */
+  /** Never rejects: a failure arrives as a stop reason plus a diagnostic. */
   readonly result: Promise<CodexRunOutcome>
   /** Ask the child to stop; local settlement stays authoritative. */
   requestCancel(): void
   /** Release the process range. Idempotent, and awaited by the caller. */
-  teardown(): Promise<void>
+  teardown(): Promise<CleanupReport>
 }
 
 /** A spawned process plus the lifecycle operations the run needs. */
 interface ManagedChild {
   readonly proc: ChildProcessWithoutNullStreams
   readonly done: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>
-  terminate(): void
-  waitForExit(timeoutMs?: number): Promise<void>
+  terminate(graceMs: number): Promise<CleanupReport>
+  waitForExit(timeoutMs: number): Promise<boolean>
 }
 
 /**
@@ -146,13 +193,19 @@ interface FailureFacts {
   readonly httpStatus?: number
 }
 
-/** A run failure, kept for its structured facts. */
+/** A run failure, kept for its structured facts and any cleanup it observed. */
 export class CodexRunFailure extends Error {
   readonly facts: FailureFacts
+  readonly cleanup: CleanupReport | undefined
 
-  constructor(facts: FailureFacts, cause?: unknown) {
-    super(`codex-pro: product subagent failure (${describeFacts(facts)})`, cause === undefined ? undefined : { cause })
+  constructor(facts: FailureFacts, cause?: unknown, cleanup?: CleanupReport) {
+    const cleanupDetail = cleanup?.confirmed === false
+      ? `; process cleanup unconfirmed${cleanup.detail === undefined ? '' : `: ${cleanup.detail}`}`
+      : ''
+    super(`codex-pro: product subagent failure (${describeFacts(facts)})${cleanupDetail}`,
+      cause === undefined ? undefined : { cause })
     this.facts = facts
+    this.cleanup = cleanup
     this.name = 'CodexRunFailure'
   }
 }
@@ -172,6 +225,11 @@ function describeFacts(facts: FailureFacts): string {
 /** Normalise an unknown throwable. */
 function thrown(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
+}
+
+/** A short non-throwing delay. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
 }
 
 /**
@@ -200,55 +258,92 @@ export function textTask(prompt: PromptBlocks): string[] {
 /**
  * Spawn the app-server and wrap its lifecycle.
  *
+ * The child is detached into its own process group on POSIX so termination can
+ * target everything the delegation owns without a global `killall`. Termination
+ * is idempotent and resolves with a confirmation report rather than assuming
+ * that a signal is the same thing as a dead process.
+ *
  * @param spec - the executable, working directory, and environment.
  * @returns the managed child.
  */
-function spawnAppServer(spec: CodexRunSpec, graceMs: number): ManagedChild {
+function spawnAppServer(spec: CodexRunSpec): ManagedChild {
+  const posix = process.platform !== 'win32'
   const proc = spawn(spec.command, ['app-server', '--stdio'], {
     cwd: spec.cwd,
     env: { ...process.env, ...spec.env },
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: posix,
+    windowsHide: true,
   })
   const done = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     proc.once('error', reject)
     proc.once('close', (exitCode, signal) => { resolve({ exitCode, signal }) })
   })
+  // A spawn error is delivered as a rejection; observe it even when the caller
+  // races it elsewhere so it can never become an unhandled rejection.
   done.catch(() => {})
-  let killed = false
-  return {
-    proc,
-    done,
-    terminate: () => {
-      if (killed) return
-      killed = true
-      // Tier one: a signal the child can act on. Tier two is unconditional.
-      try { proc.kill('SIGTERM') } catch { /* already gone */ }
-      const timer = setTimeout(() => {
-        try { proc.kill('SIGKILL') } catch { /* already gone */ }
-      }, graceMs)
-      timer.unref?.()
-      // Both settlements must clear the timer. A `finally()` here would create a
-      // second, unhandled rejection when the spawn itself failed, and the Host's
-      // unhandled-rejection handler treats that as a fatal load failure: a
-      // missing `codex` executable would take DSH Desktop down instead of
-      // failing one delegation.
-      void done.then(
-        () => { clearTimeout(timer) },
-        () => { clearTimeout(timer) },
-      )
-    },
-    waitForExit: (timeoutMs) => {
-      const exited = done.then(() => undefined, () => undefined)
-      if (timeoutMs === undefined) return exited
-      return Promise.race([
-        exited,
-        new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, timeoutMs)
-          timer.unref?.()
-        }),
-      ])
-    },
+
+  const groupPid = posix ? proc.pid : undefined
+  let termination: Promise<CleanupReport> | undefined
+
+  const groupAlive = (): boolean => {
+    if (groupPid !== undefined) {
+      try {
+        process.kill(-groupPid, 0)
+        return true
+      } catch (error: unknown) {
+        return (error as NodeJS.ErrnoException).code === 'EPERM'
+      }
+    }
+    return proc.exitCode === null && proc.signalCode === null
   }
+
+  const sendSignal = (signal: NodeJS.Signals): void => {
+    try {
+      if (groupPid !== undefined) process.kill(-groupPid, signal)
+      else proc.kill(signal)
+    } catch {
+      // ESRCH: the range is already gone. Other failures are reported by the
+      // final liveness check rather than thrown out of cleanup.
+    }
+  }
+
+  const waitForExit = (timeoutMs: number): Promise<boolean> => {
+    const exited = done.then(() => true, () => true)
+    if (timeoutMs <= 0) {
+      // A zero wait still observes an already-settled process.
+      return Promise.race([exited, Promise.resolve(false)])
+    }
+    return Promise.race([
+      exited,
+      delay(timeoutMs).then(() => false),
+    ])
+  }
+
+  const terminate = (graceMs: number): Promise<CleanupReport> => {
+    if (termination !== undefined) return termination
+    termination = (async (): Promise<CleanupReport> => {
+      if (proc.pid === undefined) {
+        // No OS process was created (for example, ENOENT); there is no owned
+        // range to leave behind.
+        return { confirmed: true }
+      }
+      sendSignal('SIGTERM')
+      await waitForExit(graceMs)
+      if (groupAlive()) {
+        sendSignal('SIGKILL')
+        await waitForExit(Math.min(Math.max(graceMs, 250), GROUP_REAP_TIMEOUT_MS))
+      }
+      const until = Date.now() + GROUP_REAP_TIMEOUT_MS
+      while (groupAlive() && Date.now() < until) await delay(25)
+      return groupAlive()
+        ? { confirmed: false, detail: 'the owned process group was still alive after SIGKILL' }
+        : { confirmed: true }
+    })()
+    return termination
+  }
+
+  return { proc, done, terminate, waitForExit }
 }
 
 /** Build the argv, for diagnostics and tests. */
@@ -256,11 +351,33 @@ export function codexAppServerArgv(command: string): string[] {
   return [command, 'app-server', '--stdio']
 }
 
+/** Build one failure for an unpublished startup. */
+function startupFailure(
+  stage: string,
+  error: unknown,
+  flags: { readonly timedOut: boolean, readonly callerAborted: boolean },
+  cleanup: CleanupReport,
+): CodexRunFailure {
+  if (error instanceof CodexRunFailure) {
+    return new CodexRunFailure(error.facts, error.cause, cleanup)
+  }
+  const category = flags.timedOut
+    ? 'timeout'
+    : flags.callerAborted
+      ? 'aborted'
+      : stage === 'process'
+        ? 'process'
+        : 'protocol'
+  return new CodexRunFailure({ stage, category }, error, cleanup)
+}
+
 /**
  * Start the app-server child and publish its one-shot run.
  *
- * Resolves only after initialization and ephemeral thread creation, so a failure
- * before that point rejects with no run published.
+ * Resolves only after initialization and thread creation/resume, so a failure
+ * before that point rejects with no run published. After publication the result
+ * never rejects; even a failed run carries its observed usage, images, thread,
+ * configuration, and cleanup report.
  *
  * @param prompt - the delegation's content blocks.
  * @param spec - working directory, executable, permission mode, and choices.
@@ -273,13 +390,20 @@ export async function startCodexRun(
   signal: AbortSignal,
 ): Promise<StartedCodexRun> {
   const texts = textTask(prompt)
-  if (signal.aborted) throw new Error('codex-pro: request was aborted before app-server startup')
+  if (signal.aborted) throw new CodexRunFailure({ stage: 'initialize', category: 'aborted' })
+
   const graceMs = spec.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS
+  const startedAt = Date.now()
+  const requestedTimeout = spec.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS
+  const deadlineAt = spec.deadlineAt
+    ?? (requestedTimeout > 0 ? startedAt + requestedTimeout : undefined)
+  const timeoutDescriptionMs = deadlineAt === undefined ? requestedTimeout : Math.max(1, deadlineAt - startedAt)
+
   let child: ManagedChild
   try {
-    child = spawnAppServer(spec, graceMs)
+    child = spawnAppServer(spec)
   } catch (error: unknown) {
-    throw new CodexRunFailure({ stage: 'initialize', category: 'unknown' }, thrown(error))
+    throw new CodexRunFailure({ stage: 'initialize', category: 'process' }, error)
   }
 
   const transport = new LineTransport(child.proc.stdin, child.proc.stdout)
@@ -290,7 +414,6 @@ export async function startCodexRun(
     {
       permissionMode: spec.permissionMode,
       model: spec.model,
-      reasoningEffort: spec.reasoningEffort,
       threadMode: spec.threadMode,
       originator: spec.originator ?? DEFAULT_ORIGINATOR,
     },
@@ -305,128 +428,168 @@ export async function startCodexRun(
   }
   child.proc.stderr.on('data', forwardStderr)
 
-  let processFailureFacts: FailureFacts | undefined
-  const processFailure = child.done.then(
-    () => {
-      processFailureFacts = { stage: 'process', category: 'process' }
-      throw new CodexRunFailure({ stage: 'process', category: 'process' })
-    },
-    (error: unknown) => {
-      processFailureFacts = { stage: 'process', category: 'unknown' }
-      throw new CodexRunFailure(processFailureFacts, thrown(error))
-    },
-  )
-  processFailure.catch(() => {})
-
   const runAbort = new AbortController()
-  /** Set when the deadline fired, so the settlement can say why it ended. */
   let timedOut = false
+  let callerAborted = false
+  let timer: NodeJS.Timeout | undefined
   const requestCancel = (): void => {
     if (runAbort.signal.aborted) return
     runAbort.abort(new Error('codex-pro: run cancelled locally'))
     wire.interrupt()
   }
-  const onAbort = (): void => { requestCancel() }
+  const onCallerAbort = (): void => {
+    callerAborted = true
+    requestCancel()
+  }
+  if (deadlineAt !== undefined) {
+    timer = setTimeout(() => {
+      timedOut = true
+      requestCancel()
+    }, Math.max(0, deadlineAt - Date.now()))
+    timer.unref?.()
+  }
+  signal.addEventListener('abort', onCallerAbort, { once: true })
+  // A signal that aborted between the pre-spawn check and this listener would
+  // otherwise never deliver its event; the run must still observe it.
+  if (signal.aborted) onCallerAbort()
 
-  const timeoutMs = spec.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS
-  const deadline = timeoutMs > 0
-    ? setTimeout(() => {
-        timedOut = true
-        requestCancel()
-      }, timeoutMs)
-    : undefined
-  // Never hold the process open for a deadline that only cancels work.
-  deadline?.unref?.()
-
-  const teardown = async (): Promise<void> => {
-    if (deadline !== undefined) clearTimeout(deadline)
+  const teardown = async (): Promise<CleanupReport> => {
+    if (timer !== undefined) clearTimeout(timer)
+    timer = undefined
+    signal.removeEventListener('abort', onCallerAbort)
     wire.close()
     try { child.proc.stdin.end() } catch { /* already closed */ }
-    child.terminate()
-    await child.waitForExit(graceMs + 500)
+    const cleanup = await child.terminate(graceMs)
     child.proc.stderr.off('data', forwardStderr)
+    return cleanup
   }
-  let tornDown: Promise<void> | undefined
-  const teardownOnce = (): Promise<void> => (tornDown ??= teardown())
+  let tornDown: Promise<CleanupReport> | undefined
+  const teardownOnce = (): Promise<CleanupReport> => (tornDown ??= teardown())
 
-  signal.addEventListener('abort', onAbort, { once: true })
+  let processFailureFacts: FailureFacts | undefined
+  const processFailure = child.done.then(
+    () => {
+      processFailureFacts = { stage: 'process', category: 'process' }
+      throw new CodexRunFailure(processFailureFacts)
+    },
+    (error: unknown) => {
+      processFailureFacts = { stage: 'process', category: 'process' }
+      throw new CodexRunFailure(processFailureFacts, error)
+    },
+  )
+  processFailure.catch(() => {})
 
   let startupStage = 'initialize'
   try {
-    await Promise.race([wire.initialize(signal), processFailure])
-    startupStage = spec.resumeThreadId === undefined ? 'thread-start' : 'thread-resume'
-    await Promise.race([
-      spec.resumeThreadId === undefined
-        ? wire.startThread(spec.cwd, signal)
-        : wire.resumeThread(spec.resumeThreadId, signal),
-      processFailure,
-    ])
+    await Promise.race([wire.initialize(runAbort.signal), processFailure])
+    if (spec.resumeThreadId === undefined) {
+      startupStage = 'thread-start'
+      await Promise.race([wire.startThread(spec.cwd, runAbort.signal), processFailure])
+    } else {
+      startupStage = 'thread-resume'
+      const overrides: CodexResumeOverrides = {
+        cwd: spec.cwd,
+        ...(spec.model === undefined ? {} : { model: spec.model }),
+        permission: spec.permissionMode,
+      }
+      await Promise.race([wire.resumeThread(spec.resumeThreadId, overrides, runAbort.signal), processFailure])
+    }
     // A persistent thread is named so the Codex application's list says where it
     // came from; the id alone cannot, because the originator has to be the value
     // that client filters on.
     if (spec.threadMode === 'persistent' && spec.threadName !== undefined) {
-      await wire.setThreadName(spec.threadName, signal)
+      startupStage = 'thread-name'
+      await Promise.race([wire.setThreadName(spec.threadName, runAbort.signal), processFailure])
     }
   } catch (error: unknown) {
-    signal.removeEventListener('abort', onAbort)
-    const cancelledBeforeCleanup = runAbort.signal.aborted
-    const failure = new CodexRunFailure({ stage: startupStage, category: 'unknown' }, thrown(error))
-    try {
-      await teardownOnce()
-    } catch (disposeError: unknown) {
-      const cleanupFailure = thrown(disposeError)
-      throw new AggregateError([failure, cleanupFailure], `${failure.message}; ${cleanupFailure.message}`)
-    }
-    if (cancelledBeforeCleanup || signal.aborted) {
-      throw new Error('codex-pro: request was aborted before run publication')
-    }
-    throw failure
+    const cleanup = await teardownOnce()
+    throw startupFailure(
+      processFailureFacts === undefined ? startupStage : 'process',
+      error,
+      { timedOut, callerAborted },
+      cleanup,
+    )
   }
 
-  const withProcessOutcome = (facts: FailureFacts | undefined): FailureFacts =>
-    facts ?? processFailureFacts ?? { stage: 'turn', category: 'unknown' }
+  const finish = async (
+    turn: { readonly output: readonly { readonly type: 'text', readonly text: string }[],
+      readonly stopReason: CodexStopReason, readonly images: readonly CodexImage[] } | undefined,
+    error: unknown,
+  ): Promise<CodexRunOutcome> => {
+    const cleanup = await teardownOnce()
+    const usage = wire.usageReport
+    const rateLimits = wire.rateLimitsReport
+    const configuration = wire.configuration
+    const observedImages = turn?.images ?? wire.images
+    let output = turn?.output ?? wire.partialOutput
+    let stopReason: CodexStopReason = turn?.stopReason
+      ?? (timedOut ? 'timeout' : callerAborted || runAbort.signal.aborted ? 'aborted' : 'error')
+    let diagnostic = wire.collectDiagnostic()
+    let structured: unknown
+    let schemaError: string | undefined
 
-  /** Settle the run without ever rejecting: a failure becomes a stop reason. */
-  const settle = async (): Promise<CodexRunOutcome> => {
+    if (spec.outputSchema !== undefined && stopReason === 'completed') {
+      const text = output.map((block) => block.text).join('\n\n')
+      const verification = verifyStructuredOutput(text, spec.outputSchema)
+      if (verification.ok) {
+        structured = verification.value
+      } else {
+        schemaError = verification.error
+        // A schema was requested: an unparseable or invalid answer is not a
+        // structured success. Preserve the raw output and say why it failed.
+        if (stopReason === 'completed') stopReason = 'error'
+        diagnostic = diagnostic === undefined ? schemaError : `${diagnostic}; ${schemaError}`
+      }
+    }
+
+    if (!cleanup.confirmed) {
+      const cleanupDetail = `process cleanup could not be confirmed${cleanup.detail === undefined ? '' : `: ${cleanup.detail}`}`
+      diagnostic = diagnostic === undefined ? cleanupDetail : `${diagnostic}; ${cleanupDetail}`
+    }
+    if (timedOut) {
+      const timeoutDetail = describeTimeout(timeoutDescriptionMs)
+      diagnostic = diagnostic === undefined ? timeoutDetail : `${diagnostic}; ${timeoutDetail}`
+    } else if (callerAborted) {
+      const abortDetail = 'codex-pro: the delegation was cancelled by its caller'
+      diagnostic = diagnostic === undefined ? abortDetail : `${diagnostic}; ${abortDetail}`
+    } else if (error !== undefined && diagnostic === undefined) {
+      diagnostic = error instanceof Error ? error.message : String(error)
+    } else if (error !== undefined && !(error instanceof CodexRunFailure)) {
+      diagnostic = `${diagnostic}; ${error instanceof Error ? error.message : String(error)}`
+    }
+
+    return {
+      output,
+      stopReason,
+      ...(diagnostic === undefined ? {} : { diagnostic }),
+      threadId: wire.threadId,
+      images: observedImages,
+      usage,
+      rateLimits,
+      ...(configuration === undefined ? {} : { configuration }),
+      cleanup,
+      ...(structured === undefined ? {} : { structured }),
+      ...(schemaError === undefined ? {} : { schemaError }),
+    }
+  }
+
+  const result = (async (): Promise<CodexRunOutcome> => {
     try {
-      const terminal = await Promise.race([
-        wire.runTurn(texts, runAbort.signal, spec.effort, spec.images ?? [], spec.outputSchema),
+      const turn = await Promise.race([
+        wire.runTurn(
+          texts,
+          runAbort.signal,
+          spec.effort ?? spec.reasoningEffort,
+          spec.images ?? [],
+          spec.outputSchema,
+        ),
         processFailure,
       ])
-      if (terminal.stopReason === 'completed') {
-        return { output: terminal.output, stopReason: terminal.stopReason, threadId: wire.threadId, images: terminal.images }
-      }
-      await new Promise((resolve) => { setImmediate(resolve) })
-      const facts = withProcessOutcome(wire.collectFailure())
-      const failure = describeFacts(facts)
-      const permission = wire.collectDiagnostic()
-      return {
-        output: terminal.output,
-        stopReason: timedOut ? 'timeout' : terminal.stopReason,
-        diagnostic: timedOut
-          ? `${describeTimeout(timeoutMs)}${permission === undefined ? '' : `\n${permission}`}`
-          : permission === undefined ? failure : `${failure}\n${permission}`,
-        threadId: wire.threadId,
-        images: terminal.images,
-      }
+      return await finish(turn, undefined)
     } catch (error: unknown) {
-      await new Promise((resolve) => { setImmediate(resolve) })
-      const facts = error instanceof CodexRunFailure ? error.facts : withProcessOutcome(wire.collectFailure())
-      const failure = describeFacts(facts)
-      const permission = wire.collectDiagnostic()
-      return {
-        output: [],
-        stopReason: timedOut ? 'timeout' : runAbort.signal.aborted ? 'aborted' : 'error',
-        diagnostic: timedOut
-          ? `${describeTimeout(timeoutMs)}${permission === undefined ? '' : `\n${permission}`}`
-          : permission === undefined ? failure : `${failure}\n${permission}`,
-        threadId: wire.threadId,
-        images: wire.images,
-      }
+      return await finish(undefined, error)
     }
-  }
-
-  const result = settle()
+  })()
 
   return {
     id: randomUUID(),
@@ -439,17 +602,6 @@ export async function startCodexRun(
 /** The message shapes the wire exchanges, re-exported for diagnostics. */
 export type { JsonRpcMessage }
 
-/**
- * Run one delegation to completion and return its final text.
- *
- * The whole protocol lifecycle — spawn, handshake, ephemeral thread, one turn,
- * teardown — behind a single call, for callers that want the answer rather than
- * a handle.
- *
- * @param options - the task, its working directory, and the two choices.
- * @returns the child's final message.
- * @throws when the run does not complete; the diagnostic is the message.
- */
 /** Which thread a call should continue, if any. */
 export interface ThreadChoice {
   /** The thread to continue, or `undefined` to start a fresh one. */
@@ -500,24 +652,107 @@ export function chooseThread(input: {
 /**
  * A delegation that did not complete.
  *
- * Carries the thread it used: a persistent thread that failed is still a thread
- * the user may want to open or remove, and the message is the only thing most
- * callers look at.
+ * Carries the thread, images, and (when publication reached the run) the whole
+ * outcome, so a caller can report observed usage even though the run failed.
  */
 export class CodexDelegationFailure extends Error {
   /** The thread the failed run used, when the app-server had got that far. */
   readonly threadId: string | undefined
   /** Images the failed run produced before it failed. */
   readonly images: readonly CodexImage[]
+  /** Everything observed about the failed run, when one was published. */
+  readonly outcome: CodexRunOutcome | undefined
 
-  constructor(message: string, threadId: string | undefined, images: readonly CodexImage[] = []) {
+  constructor(
+    message: string,
+    threadId: string | undefined,
+    images: readonly CodexImage[] = [],
+    outcome?: CodexRunOutcome,
+  ) {
     super(message)
     this.name = 'CodexDelegationFailure'
     this.threadId = threadId
     this.images = images
+    this.outcome = outcome
   }
 }
 
+/** The successful result of `delegateOnce`, with the observability fields intact. */
+export interface DelegatedCodexRun {
+  readonly text: string
+  readonly threadId: string | undefined
+  readonly images: readonly CodexImage[]
+  readonly usage: CodexUsageReport
+  readonly rateLimits: CodexRateLimitsReport
+  readonly configuration?: AppliedConfiguration
+  readonly cleanup: CleanupReport
+  readonly structured?: unknown
+}
+
+/** Run one delegation and return its settled outcome. */
+export async function runCodexOnce(
+  options: {
+    readonly prompt: string
+    readonly cwd: string
+    readonly command: string
+    readonly permissionMode: CodexPermissionMode
+    readonly model?: string | undefined
+    readonly reasoningEffort?: string | undefined
+    readonly threadMode?: CodexThreadMode | undefined
+    readonly threadId?: string | undefined
+    readonly originator?: string | undefined
+    readonly threadName?: string | undefined
+    readonly runTimeoutMs?: number | undefined
+    /** Absolute deadline shared with an auto-resume retry. */
+    readonly deadlineAt?: number | undefined
+    readonly images?: readonly string[] | undefined
+    readonly outputSchema?: Record<string, unknown> | undefined
+    readonly env?: Readonly<Record<string, string>> | undefined
+    readonly signal: AbortSignal
+    readonly onStart?: ((id: string) => void) | undefined
+    readonly onProgress?: ((text: string) => void) | undefined
+  },
+): Promise<CodexRunOutcome> {
+  const run = await startCodexRun(
+    [{ type: 'text', text: options.prompt }],
+    {
+      cwd: options.cwd,
+      command: options.command,
+      permissionMode: options.permissionMode,
+      model: options.model,
+      effort: options.reasoningEffort,
+      threadMode: options.threadMode,
+      resumeThreadId: options.threadId,
+      originator: options.originator,
+      runTimeoutMs: options.runTimeoutMs,
+      ...(options.deadlineAt === undefined ? {} : { deadlineAt: options.deadlineAt }),
+      images: options.images,
+      outputSchema: options.outputSchema,
+      threadName: options.threadName,
+      env: options.env,
+      onProgress: options.onProgress,
+    },
+    options.signal,
+  )
+  options.onStart?.(run.id)
+  try {
+    return await run.result
+  } finally {
+    await run.teardown()
+  }
+}
+
+/**
+ * Run one delegation to completion and return its final text.
+ *
+ * The result keeps the thread, images, usage, configuration and cleanup report
+ * available to callers that need to report more than the answer. A run that
+ * does not complete rejects with the whole outcome attached.
+ *
+ * @param options - the task, its working directory, and the choices.
+ * @returns the child's final message and its observability fields.
+ * @throws `CodexDelegationFailure` when the run does not complete.
+ */
 export async function delegateOnce(options: {
   readonly prompt: string
   readonly cwd: string
@@ -535,6 +770,8 @@ export async function delegateOnce(options: {
   readonly threadName?: string | undefined
   /** Deadline for the whole delegation in milliseconds; `0` disables it. */
   readonly runTimeoutMs?: number | undefined
+  /** Absolute deadline shared with an auto-resume retry. */
+  readonly deadlineAt?: number | undefined
   /** Absolute paths of images to show Codex alongside the task. */
   readonly images?: readonly string[] | undefined
   /** A JSON Schema the final answer must conform to. */
@@ -545,48 +782,30 @@ export async function delegateOnce(options: {
   readonly onStart?: (id: string) => void
   /** Narrates notable child activity. */
   readonly onProgress?: ((text: string) => void) | undefined
-}): Promise<{
-  readonly text: string
-  readonly threadId: string | undefined
-  readonly images: readonly CodexImage[]
-}> {
-  const run = await startCodexRun(
-    [{ type: 'text', text: options.prompt }],
-    {
-      cwd: options.cwd,
-      command: options.command,
-      permissionMode: options.permissionMode,
-      model: options.model,
-      reasoningEffort: options.reasoningEffort,
-      // The same choice reaches both fields: the thread default and this turn.
-      effort: options.reasoningEffort,
-
-        threadMode: options.threadMode,
-        resumeThreadId: options.threadId,
-        originator: options.originator,
-        runTimeoutMs: options.runTimeoutMs,
-        images: options.images,
-        outputSchema: options.outputSchema,
-        threadName: options.threadName,      env: options.env,
-      onProgress: options.onProgress,
-    },
-    options.signal,
-  )
-  options.onStart?.(run.id)
-  try {
-    const outcome = await run.result
-    const text = outcome.output.map((block) => block.text).join('\n\n')
-      if (outcome.stopReason === 'completed' && text !== '') {
-        return { text, threadId: outcome.threadId, images: outcome.images ?? [] }
-      }
-    // A failure still reports its thread: a persistent thread that half-ran is
-    // still one the user may want to open or clean up.
+}): Promise<DelegatedCodexRun> {
+  const outcome = await runCodexOnce(options)
+  const text = outcome.output.map((block) => block.text).join('\n\n')
+  if (
+    outcome.stopReason !== 'completed'
+    || text === ''
+    || outcome.schemaError !== undefined
+    || !outcome.cleanup.confirmed
+  ) {
     throw new CodexDelegationFailure(
       outcome.diagnostic ?? `codex-pro: the run ended as ${outcome.stopReason}`,
       outcome.threadId,
       outcome.images ?? [],
+      outcome,
     )
-  } finally {
-    await run.teardown()
+  }
+  return {
+    text,
+    threadId: outcome.threadId,
+    images: outcome.images ?? [],
+    usage: outcome.usage,
+    rateLimits: outcome.rateLimits,
+    ...(outcome.configuration === undefined ? {} : { configuration: outcome.configuration }),
+    cleanup: outcome.cleanup,
+    ...(outcome.structured === undefined ? {} : { structured: outcome.structured }),
   }
 }

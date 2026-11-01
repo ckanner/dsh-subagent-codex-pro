@@ -115,8 +115,8 @@ test('the tool exposes model and effort only while the host opts in', async () =
   const props = (tool: { parameters: Record<string, unknown> }): string[] =>
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
-  assert.deepEqual(props(off), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd'])
-  assert.deepEqual(props(on), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(off), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode'])
+  assert.deepEqual(props(on), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
   // The harness rejects a descriptor map: `parameters` must be a JSON Schema object.
   for (const tool of [off, on]) {
     assert.equal((tool.parameters as { type?: string }).type, 'object')
@@ -156,6 +156,33 @@ test('the tool forwards the call\'s model and effort to the runner', async () =>
   )
 })
 
+test('the tool forwards a per-call permission mode and rejects an unknown one', async () => {
+  const { createCodexTool } = await import('../src/tool.ts')
+  const seen: (string | undefined)[] = []
+  const tool = createCodexTool({
+    cwd: '/w',
+    modelSelectionEnabled: true,
+    run: async (request) => {
+      seen.push(request.permissionMode)
+      return { text: 'DONE', threadId: undefined }
+    },
+  })
+  await tool.execute(
+    { description: 'review', prompt: 'inspect only', permission_mode: 'read-only' },
+    { signal: new AbortController().signal },
+  )
+  assert.deepEqual(seen, ['read-only'])
+  await tool.execute({ description: 'write', prompt: 'implement it' }, { signal: new AbortController().signal })
+  assert.deepEqual(seen, ['read-only', undefined])
+  await assert.rejects(
+    async () => tool.execute(
+      { description: 'probe', prompt: 'go', permission_mode: 'read-everything' },
+      { signal: new AbortController().signal },
+    ),
+    /permission_mode must be one of/,
+  )
+})
+
 test('run_in_background appears only when the jobs service is present', async () => {
   const { createCodexTool } = await import('../src/tool.ts')
   const base = {
@@ -168,9 +195,9 @@ test('run_in_background appears only when the jobs service is present', async ()
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
   assert.deepEqual(props(createCodexTool({ ...base, backgroundEnabled: false })),
-    ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
+    ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
   assert.deepEqual(props(createCodexTool({ ...base, backgroundEnabled: true })),
-    ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort', 'run_in_background'])
+    ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort', 'run_in_background'])
 
   // Without background support the output is a plain answer, so the schema stays simple.
   const off = createCodexTool({ ...base, backgroundEnabled: false })
@@ -247,8 +274,8 @@ test('the tool declares and forwards the thread controls when enabled', async ()
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
   // disabled: the schema is exactly what it was before this feature existed
-  assert.deepEqual(props(make(false)), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort'])
-  assert.deepEqual(props(make(true)), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
+  assert.deepEqual(props(make(false)), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(make(true)), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
 
   const tool = make(true)
   await tool.execute(

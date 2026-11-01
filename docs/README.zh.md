@@ -32,7 +32,7 @@ modelSelectionSettings: true ← 要求 provider 声明 `agentOptions`
                                 → 启用它会在 preset 挂载时抛错
 ```
 
-Codex 协议本身**支持**这两个字段（`ThreadStartParams.reasoningEffort`、`TurnStartParams.effort`）；官方 provider 从不发送它们。已上报上游：<https://github.com/deepseek-ai/deepseek-harness/discussions/9115>
+Codex 协议支持本包暴露的这些选择：`thread/start` 上的 `model` 和无人值守权限策略，`thread/resume`（0.165+）上的 model/cwd/permission 覆盖，以及每轮 `turn/start` 上的 `effort`。官方 provider 从不发送它们。已上报上游：<https://github.com/deepseek-ai/deepseek-harness/discussions/9115>
 
 还有**第二个独立的缺陷**：在一个 provider 是外部的行（`codex-pro`）上启用 `modelSelectionSettings: true`，会让那一行**静默地**一个工具都不注册 —— 没有报错、没有日志、没有 preset 失败标记。一个除了这个开关之外完全相同的对照行却能正常注册。也写在那份报告里。
 
@@ -46,10 +46,14 @@ Codex 协议本身**支持**这两个字段（`ThreadStartParams.reasoningEffort
 
 ```js
 // thread/start
-{ cwd, ephemeral: true, ...(model ? { model } : {}), reasoningEffort, ...THREAD_PERMISSION_PARAMS[mode] }
+{ cwd, ephemeral: true, ...(model ? { model } : {}), ...THREAD_PERMISSION_PARAMS[mode] }
+// thread/resume（0.165+）
+{ threadId, cwd, ...(model ? { model } : {}), ...THREAD_PERMISSION_PARAMS[mode] }
 // turn/start
-{ threadId, input: [...], effort }
+{ threadId, input: [...], effort, ...(outputSchema ? { outputSchema } : {}) }
 ```
+
+思考等级在 0.165/0.166 里是 `turn/start` 字段，不是 `thread/start` 字段；线程级默认值交给 Codex。
 
 这两个字面量在官方适配器那 871 行里**一次都没出现过**。与源码有两处机械性差异：JSON-RPC 传输是本包自己的（`src/jsonrpc.ts`），以及 app-server 是作为 `<command> app-server --stdio` 从 `PATH` 启动的，而不是从 `@openai/codex` 的 manifest 启动。`src/codex-exec.ts`（更早的 `codex exec` 路径）保留且有测试，但**未使用**。
 
@@ -85,8 +89,9 @@ dsh plugin --profile desktop add link:/path/to/dsh-subagent-codex-pro
 ```sh
 npm install
 npm run typecheck
-npm test                                  # argv + 工具 schema 用例；真实用例跳过
-CODEX_SUBAGENT_LIVE=1 npm test            # 额外用 gpt-6-astra + xhigh 真跑一次
+npm test                                  # 离线套件；live 用例跳过
+CODEX_SUBAGENT_LIVE=1 npm test            # 额外用真实 Codex 跑一次 turn
+npm run test:coverage                     # Node 内置覆盖率报告
 ```
 
 插件把每个决定都记到 `~/.dsh/codex-pro.log`：
@@ -100,7 +105,7 @@ run: published 3f2a…
 run done: text=8B
 ```
 
-一次已验证的端到端运行：30 秒墙钟时间，模型的 `PROBE_OK` 作为工具结果返回。真实 app-server 运行也由 live 测试覆盖 —— 它开一个带 `reasoningEffort` 的 thread，以及一个带 `effort` 的 turn。
+一次已验证的端到端运行：30 秒墙钟时间，模型的 `PROBE_OK` 作为工具结果返回。真实 app-server 的 live 测试开一个 thread，并把 `effort` 放在 turn 上；它不声称存在线程级 thinking level（0.165/0.166 不接受）。
 
 ## 让答案可被机器读取
 
@@ -204,7 +209,7 @@ Codex 能看图、也能截图；这个工具现在能把那些图交回来。
 这种失败**安静得最糟糕**：`id` 匹配不到任何条目、或 `name` 与目标不一致的 patch，会被**警告后跳过**，而不是报错；而丢掉 `presets` 的 config **照样挂载**，只是不为任何会话服务。本插件写进 `~/.dsh/codex-pro.log` 的那行 `apply` 会列出它**实际收到**的 presets —— 要核查就看那一行：
 
 ```
-apply: v0.6.1 provider "codex-pro" registered … timeout=5400000ms; presets=["daily","heavy"]
+apply: v0.7.0 provider "codex-pro" registered … timeout=5400000ms; presets=["daily","heavy"]
                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
 ```
 
@@ -221,7 +226,11 @@ apply: v0.6.1 provider "codex-pro" registered … timeout=5400000ms; presets=["d
 
 调用可以自己指定 `timeout_ms`，它**覆盖**该次委派的配置默认值 —— 填 `0` 表示**不设期限**。这正是让期限**能在提示词里用起来**的关键：发布冒烟需要几十分钟，一次快速查证不需要，而模型**能说出这次是哪种**，因为这个值是**参数**而不是文件里的一个数。
 
-**卡住的委派在外部是完全看不见的。** job 一直停在 `running`，会话一直等，日志里什么都没有 —— 而一次卡住的模型请求，从外面看就是这样。`runTimeoutMs` 是一次完整委派的期限：到点就取消这次运行、清理它的子进程，并在结果里写明 `codex-pro: the delegation exceeded its 600000 ms deadline and was cancelled`，而不是什么都没有。默认十分钟，对一类自述"要一分钟以上"的任务来说很宽裕；填 `0` 则恢复"无限等待"的旧行为。
+**卡住的委派在外部是完全看不见的。** job 一直停在 `running`，会话一直等，日志里什么都没有 —— 而一次卡住的模型请求，从外面看就是这样。`runTimeoutMs` 是一次完整委派的期限，并且**覆盖启动阶段**：`initialize`、`thread/start`/`thread/resume`、`thread/name/set` 和 turn 共用同一个派生取消信号。到点就取消运行，在**独立的有限宽限期**内清理进程范围，并在结果里写明 `codex-pro: the delegation exceeded its 600000 ms deadline and was cancelled`。默认十分钟；填 `0` 恢复无限等待。
+
+超时、调用方取消、协议失败、进程意外退出是不同类别；只会结算一次，teardown 幂等。自动修复 resume 时新建的 thread 共用原始绝对期限，不会重新拿一个完整超时。
+
+**清理是"被证明"的，不是假设的。** POSIX 上 app-server 是自己进程组的 leader；teardown 先给整个组 `SIGTERM`，等待 `disposeGraceMs`（默认 3 秒），再 `SIGKILL`，并轮询直到进程组消失。比父进程活得久的后代如果仍在，就会报告 `cleanup: { confirmed: false, detail: … }`；本包不会运行全局 `killall codex`。Windows 上只管理直接子进程，进程范围确认是 POSIX 保证。
 
 | | |
 |---|---|
@@ -235,7 +244,7 @@ apply: v0.6.1 provider "codex-pro" registered … timeout=5400000ms; presets=["d
 [codex thread 01a1212b-79cf-7241-8892-896094fad3d6 · persistent · pass it as thread_id to continue]
 ```
 
-续接时会**忽略** `model` 和 `reasoning_effort`：二者都是 `thread/start` 的参数，而被续接的 thread 保留它创建时的取值。每轮的 `effort` 仍然有效。
+0.165 上续接**不会忽略调用方的选择**：`model`、`cwd`、`permission_mode` 会作为 `thread/resume` 覆盖发送，并与响应里的有效配置比较。`reasoning_effort` 仍是每轮设置，续接时继续有效。对**记住的 session thread**，配置不兼容就换一条新 thread（共用同一期限）；对**显式 `thread_id`**，不兼容会明确报错，而不是悄悄换一条。
 
 **有两件事由 app-server 决定，都是实测出来的。** 还没跑过 turn 的 thread **无法续接** —— 它会回 `no rollout found` —— 所以一条 thread 只有在完成第一次 turn 之后才可续接。另外，**Codex 应用只在 originator 恰好是 `Codex Desktop` 时才会列出该 thread**，那是它客户端过滤用的唯一取值；`originator` 就是设置它的，默认即该字面量。改成别的值就是用**应用内可见性**换一个**诚实的名字**，而 Codex CLI 两种情况都能列出。
 
@@ -256,6 +265,47 @@ tools.subagent_codex({ description: "…", prompt: "…", run_in_background: tru
 
 子进程自己的活动会在发生时**追加到该 job 的输出环**里 —— 已完成的命令和文件改动，加上 Codex 的 `commentary` 消息 —— 所以 `job_output` 显示的是长委派**进行得怎么样**，而不只是它最后说了什么。
 
+## 权限：包括只读 Review
+
+权限模式是插件的无人值守策略，不是审批提示。默认值仍然是实现任务需要的可写模式，本次没有全局改变它。
+
+| 模式 | `approvalPolicy` | `sandbox` | 用途 |
+|---|---|---|---|
+| `dangerously-bypass-approvals-and-sandbox` | `never` | `danger-full-access` | 默认实现任务 |
+| `approve-for-me` | `on-request` | `workspace-write` | 可写工作，批准交给 reviewer |
+| `never` | `never` | 省略 | 不弹审批，但**不是只读** |
+| `read-only` | `never` | `read-only` | 只读 review / 检查 |
+
+`approvalPolicy: 'never'` 只表示"不向人请求批准"，不限制文件系统或执行沙箱。真正的只读 Review 需要 `sandbox: 'read-only'`；新增的 `read-only` 模式会在 `thread/start` 和 `thread/resume` 上都发送它。也可以按调用传 `permission_mode`，这样 Review 用只读、默认实现任务继续保留写权限。requested 与 effective 权限都会记录在运行结果和诊断日志里；响应忽略了请求会失败。
+
+## token usage 与限额
+
+Codex 通过 `thread/tokenUsage/updated` 报告线程累计的 `total` 和最近一次模型调用的 `last`。一次委派可能调用模型多次，而 `thread/resume` 会把持久化的最新快照重放给新连接；把重放当成本次消耗是错的。
+
+统计器把通知折叠成一次委派的报告：
+
+- `run` 是相对观测 baseline 的增量，绝不是把通知快照相加。
+- resume 在 turn 开始前的重放会作为 baseline，不计入本次消耗。
+- resume 没有重放就收到第一条 live 快照时，报告是 `partial`，不会凭空写 0。
+- 重复/乱序快照忽略；计数回退标记 `partial`，不产生负数。
+- 其他 thread/turn 的 usage 不加进来。
+- 没有观测时是 `unknown` 且没有 `run`，不是假的 `0`；失败、超时或取消前已观测到的 usage 会保留在失败结果里。
+- `cachedInputTokens` 是 `inputTokens` 的子集，`reasoningOutputTokens` 是 `outputTokens` 的子集；字段按 Codex 原样报告，绝不重复相加。
+
+`account/rateLimits/updated` 作为 `rateLimits` 单独保存，不并入 token usage。二者都会出现在 `CodexRunOutcome` / `delegateOnce` 结果和诊断日志中。DSH 的 `SubagentResult` 与工具结果契约没有 `usage`/`rateLimits` 字段，所以 provider 和自定义工具**不发明宿主字段**：工具结果仍只有 content，后台 job 结果仍是契约规定的字符串。诊断日志是宿主可见的观测面。
+
+## 结构化结果的校验
+
+`output_schema` 的结果现在**失败即关闭**：JSON 不合法、不是对象、required/type/range 不满足，或 schema 使用本包无法校验的关键字，都会让运行报告错误/诊断，而不是静默省略 `structured`。校验器覆盖本工具接受的对象根 JSON Schema 子集；不支持的关键字明确报错，不假装校验过。
+
+当调用带 `output_schema` 时，答案就是 Codex 返回的纯 JSON 文本，**不会**追加 persistent thread 标记；thread id 另行报告并写入诊断日志。人类可读的普通答案仍然保留续接 thread 所需的标记。
+
+## 验证层次
+
+1. **离线/封闭**：默认 `npm test`。用真实协议类和真实子进程驱动脚本化 fake app-server，覆盖启动卡死、turn 卡死、调用方取消、提前退出、resume、usage 重放、重复、只读权限、结构化校验、进程组后代和幂等 teardown。不调用模型，不碰 Codex 账号。
+2. **真实 Codex app-server**：已用安装的 Codex **0.165.0** 跑 live app-server 用例（`CODEX_SUBAGENT_LIVE=1`），**4/4 通过**：覆盖 model + effort、默认配置、persistent thread 带显式 model/cwd/read-only 覆盖续接（含 usage 重放和 effective 配置校验），以及 `output_schema` 解码。单独的 `codex exec` live 用例也通过（该文件 20/20，其中一次真实 CLI 调用）。官方 **0.166.0** 的 `ThreadResumeParams`、`ThreadResumeResponse`、`ThreadTokenUsage`、`token_usage_replay.rs` 已审阅，但没有执行 0.166 runtime。
+3. **真实 DSH desktop 端到端**：仍未运行。实现保持现有 DSH provider/tool/job 契约；桌面 smoke 仍是唯一未执行的验证层。v0.7.0 通过仓库的 tag 发布流程发布；未修改用户全局 Codex 登录/配置。
+
 ## 能力
 
 | | 状态 |
@@ -264,8 +314,13 @@ tools.subagent_codex({ description: "…", prompt: "…", run_in_background: tru
 | 返回最终消息 | ✅ |
 | 本次运行产生的图片（截图、看过的文件） | ✅ 当调用方的模型路由接受图片时 |
 | 交给本次运行的图片（`images`，绝对路径） | ✅ |
-| schema 强约束的答案（`output_schema`，或 harness 的行配置） | ✅ |
+| schema 强约束的答案（`output_schema`，或 harness 的行配置） | ✅ 本地校验 |
 | `run_in_background` + 通过 `job_output` 看进度 | ✅ |
+| 只读 Review 权限（`read-only`） | ✅ `approvalPolicy=never` + `sandbox=read-only` |
+| token usage / model context window | ✅ 内部 outcome + 诊断日志；DSH result/tool/job 契约无 usage 字段 |
+| 账号限额 | ✅ 与 token usage 分开；内部/日志可见 |
+| 带确认的进程范围清理 | ✅ POSIX；无法确认会明确报告 |
+| 期限覆盖启动与 turn；区分用户取消 | ✅ |
 | app-server 协议（握手、线程生命周期、批准决定） | ✅ |
 | 交互式批准 | 按设计没有 —— 委派运行是无人值守的，和官方 provider 一样 |
 | 可续接 / thread 复用 | ✅ `session` 复用一条；`thread_id` 可续接任意一条 |

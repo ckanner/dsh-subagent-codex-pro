@@ -1,14 +1,13 @@
 /**
  * The protocol adapter, driven by a scripted app-server peer.
  *
- * The decisive cases are the first two: `thread/start` must carry
- * `reasoningEffort` and `turn/start` must carry `effort`. Those two fields are
- * the entire reason this package exists — the official adapter sends neither,
- * and the strings do not appear anywhere in its 871 lines.
+ * The decisive cases are the per-call model and per-turn `effort`, the 0.165
+ * resume overrides, and the effective-configuration checks. A thinking level is
+ * a `turn/start` field, not a `thread/start` field in 0.165/0.166.
  *
  * The rest covers the behaviour the port inherits: the handshake, terminal
- * answer selection by phase, the turn-id ordering rules, and unattended
- * approvals.
+ * answer selection by phase, the turn-id ordering rules, unattended approvals,
+ * and token-usage notification accounting.
  *
  * @module dsh-subagent-codex-pro/tests/wire
  */
@@ -92,7 +91,6 @@ class Peer {
 function harness(options: {
   permissionMode?: CodexPermissionMode
   model?: string
-  reasoningEffort?: string
   threadMode?: 'ephemeral' | 'persistent'
   originator?: string
   respond?: (method: string, params: unknown, peer: Peer) => unknown | undefined
@@ -109,7 +107,6 @@ function harness(options: {
     {
       permissionMode: options.permissionMode ?? 'never',
       model: options.model,
-      reasoningEffort: options.reasoningEffort,
       threadMode: options.threadMode,
       originator: options.originator,
     },
@@ -139,13 +136,14 @@ function standardPeer(effortAware = true): (method: string, params: unknown, pee
   }
 }
 
-test('thread/start carries the reasoning effort the official adapter never sends', async () => {
-  const { wire, peer } = harness({ reasoningEffort: 'xhigh', model: 'gpt-6-astra', respond: standardPeer() })
+test('thread/start sends protocol parameters and no invention of reasoningEffort', async () => {
+  const { wire, peer } = harness({ model: 'gpt-6-astra', respond: standardPeer() })
   await wire.initialize()
   peer.pump()
   await wire.startThread('/work')
   const params = peer.paramsOf('thread/start')
-  assert.equal(params.reasoningEffort, 'xhigh')
+  // 0.165/0.166 ThreadStartParams has no reasoningEffort; thinking is per turn.
+  assert.equal(params.reasoningEffort, undefined)
   assert.equal(params.model, 'gpt-6-astra')
   assert.equal(params.cwd, '/work')
   assert.equal(params.ephemeral, true)
@@ -422,10 +420,8 @@ test('persistent mode is rejected when the app-server downgrades it', async () =
   )
 })
 
-test('resumeThread continues a thread without restating model or effort', async () => {
+test('resumeThread continues a thread without restating unset values', async () => {
   const { wire, peer } = harness({
-    model: 'gpt-6-astra',
-    reasoningEffort: 'xhigh',
     respond: (method) => {
       if (method === 'initialize') return {}
       if (method === 'thread/resume') return { thread: { id: 'thread-7', ephemeral: false } }
@@ -437,10 +433,148 @@ test('resumeThread continues a thread without restating model or effort', async 
   await wire.resumeThread('thread-7')
   const params = peer.paramsOf('thread/resume')
   assert.equal(params.threadId, 'thread-7')
-  // Both are thread/start parameters: a resumed thread keeps the ones it was made with.
   assert.equal(params.model, undefined)
-  assert.equal(params.reasoningEffort, undefined)
+  assert.equal(params.cwd, undefined)
   assert.equal(wire.threadId, 'thread-7')
+})
+
+test('resumeThread applies explicit model, cwd and permission overrides', async () => {
+  const { wire, peer } = harness({
+    respond: (method, params) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/resume') {
+        const requested = params as Record<string, unknown>
+        return {
+          thread: { id: 'thread-7', ephemeral: false },
+          model: requested.model,
+          cwd: requested.cwd,
+          approvalPolicy: requested.approvalPolicy,
+          approvalsReviewer: requested.approvalsReviewer,
+          sandbox: { type: 'readOnly' },
+        }
+      }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.resumeThread('thread-7', { model: 'gpt-6.1-terra', cwd: '/work', permission: 'read-only' })
+  const params = peer.paramsOf('thread/resume')
+  assert.equal(params.model, 'gpt-6.1-terra')
+  assert.equal(params.cwd, '/work')
+  assert.equal(params.approvalPolicy, 'never')
+  assert.equal(params.sandbox, 'read-only')
+  assert.equal(wire.configuration?.requested.model, 'gpt-6.1-terra')
+  assert.equal(wire.configuration?.effective.model, 'gpt-6.1-terra')
+  assert.equal(wire.configuration?.matched, true)
+})
+
+test('resumeThread fails when the app-server ignored a requested override', async () => {
+  const { wire } = harness({
+    respond: (method) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/resume') {
+        return {
+          thread: { id: 'thread-7', ephemeral: false },
+          model: 'gpt-5.6-sol',
+          cwd: '/somewhere-else',
+          approvalPolicy: 'never',
+          sandbox: { type: 'readOnly' },
+        }
+      }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  await assert.rejects(
+    wire.resumeThread('thread-7', { model: 'gpt-6.1-terra', cwd: '/work', permission: 'read-only' }),
+    /did not apply the requested configuration/,
+  )
+})
+
+test('read-only permission is never confused with approvalPolicy=never alone', async () => {
+  const { wire, peer } = harness({ permissionMode: 'read-only', respond: standardPeer() })
+  await wire.initialize()
+  peer.pump()
+  await wire.startThread('/work')
+  const params = peer.paramsOf('thread/start')
+  assert.equal(params.approvalPolicy, 'never')
+  assert.equal(params.sandbox, 'read-only')
+})
+
+test('token usage is folded from cumulative totals and rate limits stay separate', async () => {
+  const breakdown = (n: number) => ({
+    totalTokens: n, inputTokens: n, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    outputTokens: 0, reasoningOutputTokens: 0,
+  })
+  const { wire, peer } = harness({
+    respond: (method, params, self) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true }, model: params && (params as Record<string, unknown>).model, cwd: '/work', approvalPolicy: 'never', sandbox: { type: 'workspaceWrite' } }
+      if (method === 'turn/start') {
+        setImmediate(() => {
+          self.notify('thread/tokenUsage/updated', { threadId: 'thread-1', turnId: 'turn-1', tokenUsage: { total: breakdown(100), last: breakdown(100), modelContextWindow: 272000 } })
+          self.notify('thread/tokenUsage/updated', { threadId: 'thread-1', turnId: 'turn-1', tokenUsage: { total: breakdown(300), last: breakdown(300), modelContextWindow: 272000 } })
+          self.notify('account/rateLimits/updated', { rateLimits: { primary: { usedPercent: 12 } } })
+          self.notify('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', phase: 'final_answer', text: 'FINAL' } })
+          self.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } })
+        })
+        return { turn: { id: 'turn-1' } }
+      }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.startThread('/work')
+  peer.pump()
+  const running = wire.runTurn(['go'])
+  await new Promise((resolve) => { setImmediate(resolve) })
+  peer.pump()
+  await running
+  const usage = wire.usageReport
+  assert.equal(usage.status, 'complete')
+  assert.equal(usage.run?.totalTokens, 300)
+  assert.deepEqual(usage.modelContextWindow, 272000)
+  assert.equal(wire.rateLimitsReport.observations, 1)
+  assert.deepEqual(wire.rateLimitsReport.latest, { primary: { usedPercent: 12 } })
+})
+
+test('a resumed thread treats a pre-turn usage replay as a baseline', async () => {
+  const breakdown = (n: number) => ({
+    totalTokens: n, inputTokens: n, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    outputTokens: 0, reasoningOutputTokens: 0,
+  })
+  const { wire, peer } = harness({
+    respond: (method, params, self) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/resume') {
+        self.notify('thread/tokenUsage/updated', { threadId: 'thread-7', turnId: 'old-turn', tokenUsage: { total: breakdown(1000), last: breakdown(1000), modelContextWindow: 272000 } })
+        return { thread: { id: 'thread-7', ephemeral: false }, model: params && (params as Record<string, unknown>).model, cwd: '/work', approvalPolicy: 'never', sandbox: { type: 'readOnly' } }
+      }
+      if (method === 'turn/start') {
+        setImmediate(() => {
+          self.notify('thread/tokenUsage/updated', { threadId: 'thread-7', turnId: 'turn-1', tokenUsage: { total: breakdown(1300), last: breakdown(1300), modelContextWindow: 272000 } })
+          self.notify('item/completed', { threadId: 'thread-7', turnId: 'turn-1', item: { type: 'agentMessage', phase: 'final_answer', text: 'FINAL' } })
+          self.notify('turn/completed', { threadId: 'thread-7', turn: { id: 'turn-1', status: 'completed' } })
+        })
+        return { turn: { id: 'turn-1' } }
+      }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.resumeThread('thread-7', { model: 'gpt-6.1-terra', cwd: '/work', permission: 'read-only' })
+  peer.pump()
+  const running = wire.runTurn(['go'])
+  await new Promise((resolve) => { setImmediate(resolve) })
+  peer.pump()
+  await running
+  const usage = wire.usageReport
+  assert.equal(usage.status, 'complete')
+  assert.equal(usage.replayedBaseline, true)
+  assert.equal(usage.run?.totalTokens, 300)
 })
 
 test('resumeThread refuses a reply about another thread', async () => {
