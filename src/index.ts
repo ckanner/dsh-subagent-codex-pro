@@ -30,9 +30,8 @@
  *    — the path `dsh-plugin-lcu` uses — so the harness's preset-row machinery
  *    stays out of the way. `presets` names the presets that get it.
  *
- * `model` and `reasoning_effort` appear in the schema only while the host's
- * model-selection opt-in is enabled, so an Agent can never route itself to a
- * model the user has not authorized.
+ * `model` and `reasoning_effort` appear while this plugin's independent
+ * modelSelection setting is enabled. Codex model ids are not DSH LLM routes.
  *
  * @module dsh-subagent-codex-pro
  */
@@ -320,10 +319,22 @@ const PLUGIN_VERSION: string = (() => {
 })()
 
 /** The effort values Codex accepts; used only for diagnostics. */
-const KNOWN_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const
+const KNOWN_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 /** The unattended default: a delegated task must run without a human present. */
-const DEFAULT_PERMISSION_MODE: CodexPermissionMode = 'dangerously-bypass-approvals-and-sandbox'
+const DEFAULT_PERMISSION_MODE: CodexPermissionMode = 'workspace-write'
+
+/** Tool calls may narrow their configured policy, never expand it implicitly. */
+export function resolvePermissionOverride(
+  configured: CodexPermissionMode, requested: CodexPermissionMode | undefined,
+): CodexPermissionMode {
+  const permission = requested ?? configured
+  if (permission !== configured && permission !== 'read-only'
+    && !(configured === 'dangerously-bypass-approvals-and-sandbox' && permission === 'workspace-write')) {
+    throw new Error('subagent_codex: permission override exceeds the configured policy; change plugin configuration explicitly')
+  }
+  return permission
+}
 
 /**
  * Append one line to `~/.dsh/codex-pro.log`.
@@ -369,10 +380,9 @@ export class CodexExecProvider implements SubagentProviderLike {
    */
   readonly capabilities = {
     agentOptions: true,
+    agentPreset: false,
     outputSchema: true,
     depthLimit: false,
-    toolFilter: false,
-    persona: false,
   } as const
 
   /**
@@ -403,6 +413,11 @@ export class CodexExecProvider implements SubagentProviderLike {
       throw new Error('codex-pro: the parent session has no working directory to delegate from')
     }
     const options = request.agentOptions
+    // Host AgentOptions are not Codex configuration. Unsupported fields must
+    // never disappear behind the coarse agentOptions capability flag.
+    if (options?.provider !== undefined || options?.maxTokens !== undefined) {
+      throw new Error('codex-pro: provider and maxTokens overrides are not supported by this Codex backend')
+    }
     const model = options?.model ?? this.resolved.model
     const effort = options?.reasoningEffort ?? this.resolved.reasoningEffort
     const spec: CodexRunSpec = {
@@ -441,9 +456,13 @@ export class CodexExecProvider implements SubagentProviderLike {
           diag(`provider config: requested=${JSON.stringify(outcome.configuration.requested)} `
             + `effective=${JSON.stringify(outcome.configuration.effective)}`)
         }
-        // `finish` already folds schema errors, cleanup warnings, and timeout /
-        // abort detail into `diagnostic`; do not append them twice.
-        const diagnostic = outcome.diagnostic ?? ''
+        // DSH diagnostics are bounded metadata, never raw server messages,
+        // prompts, paths, environment values, or structured answer contents.
+        const diagnostic = [
+          ...(outcome.stopReason === 'completed' ? [] : ['codex-pro: run ended as ' + outcome.stopReason]),
+          ...(outcome.cleanup.confirmed ? [] : ['process cleanup could not be confirmed']),
+          ...(outcome.schemaError === undefined ? [] : ['structured output did not satisfy the requested schema']),
+        ].join('; ')
         return {
           output: outcome.output,
           // The harness's own vocabulary has no `timeout`; its `aborted` is what
@@ -453,9 +472,12 @@ export class CodexExecProvider implements SubagentProviderLike {
           ...(diagnostic === '' ? {} : { diagnostic }),
         }
       }),
-      // The harness contract's dispose is void; the cleanup report is logged and
-      // carried by the run outcome instead.
-      dispose: () => run.teardown().then(() => undefined),
+      // Host dispose returns void on success, but rejects when teardown cannot
+      // be confirmed. The manager records that failure separately from output.
+      dispose: async () => {
+        const cleanup = await run.teardown()
+        if (!cleanup.confirmed) throw new Error('codex-pro: process cleanup could not be confirmed')
+      },
     }
   }
 }
@@ -723,7 +745,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const runSchema = call.outputSchema === undefined
         ? undefined
         : checkedOutputSchema(call.outputSchema)
-      const callPermission = call.permissionMode ?? resolved.permissionMode
+      const callPermission = resolvePermissionOverride(resolved.permissionMode, call.permissionMode)
       const timeoutMs = runTimeout ?? resolved.runTimeoutMs
       // One absolute deadline for this call, shared by the auto-resume retry: a
       // second attempt after a failed resume must not receive a fresh budget.

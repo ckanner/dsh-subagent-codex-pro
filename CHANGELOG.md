@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0 (unreleased)
+
+- Add the public protocol-1 machine API and single-request CLI, preserving run identity, actual process facts, configuration and usage completeness without changing DSH Host result shapes.
+- Supervise POSIX Codex groups with an IPC-lifeline guardian so caller death triggers bounded cleanup; never substitute supervisor exit for the actual Codex exit.
+- Reject missing or conflicting effective configuration before sending a task. Preserve full sandbox policy and request-only effort evidence.
+- Default to workspace-write + never; full access remains explicit and tool overrides cannot expand configured permissions.
+- Align DSH rc.5 capabilities, reject unsupported provider/maxTokens overrides, and reject dispose when cleanup is unconfirmed.
+- Correct malformed, early, foreign-turn and resumed token-usage accounting; unknown counters and costs are not zero.
+- Add Ubuntu/macOS Node22/24 CI, real packed-package/public-entry tests, migration notes and Flywheel/PR workflow documentation.
+- Live Codex/account/DSH desktop validation is not claimed for this version.
+
 ## 0.7.0
 
 Adapter reliability and observability hardening. Released 2026-11-01. The

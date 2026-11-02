@@ -13,6 +13,16 @@ tools.subagent_codex({
 })
 ```
 
+## 0.8.0 正式机器入口与迁移
+
+新增 [machine API/CLI](machine.md)，让 Go 等编排器直接复用本包的 Codex 运行核心，
+取得版本化收据；无需构造 DSH 父 Agent，也无需解析日志。完整接入边界、需求准备
+模型建议、worktree 与 PR 时机见 [编排指南](orchestration.zh.md)。
+
+默认权限改为 workspace-write；旧配置显式full access时保留该选择。DSH能力声明
+对齐rc.5：agentOptions、agentPreset=false、outputSchema、depthLimit=false。
+无法兑现的provider/maxTokens覆盖明确拒绝；cleanup无法确认时结果失败且dispose拒绝。
+
 ## 它补的是什么缺口
 
 `subagent_codex` 的 schema 只暴露 `description` 和 `prompt`，所以调用方**无法指定模型或思考等级**。在一次真实会话里，被要求做这件事的模型试了最直接的做法，结果被拒绝：
@@ -87,10 +97,12 @@ dsh plugin --profile desktop add link:/path/to/dsh-subagent-codex-pro
 ## 验证
 
 ```sh
-npm install
+npm ci --ignore-scripts
 npm run typecheck
 npm test                                  # 离线套件；live 用例跳过
 CODEX_SUBAGENT_LIVE=1 npm test            # 额外用真实 Codex 跑一次 turn
+npm run build
+npm run test:package                      # 安装并运行真实打包产物
 npm run test:coverage                     # Node 内置覆盖率报告
 ```
 
@@ -230,7 +242,7 @@ apply: v0.7.0 provider "codex-pro" registered … timeout=5400000ms; presets=["d
 
 超时、调用方取消、协议失败、进程意外退出是不同类别；只会结算一次，teardown 幂等。自动修复 resume 时新建的 thread 共用原始绝对期限，不会重新拿一个完整超时。
 
-**清理是"被证明"的，不是假设的。** POSIX 上 app-server 是自己进程组的 leader；teardown 先给整个组 `SIGTERM`，等待 `disposeGraceMs`（默认 3 秒），再 `SIGKILL`，并轮询直到进程组消失。比父进程活得久的后代如果仍在，就会报告 `cleanup: { confirmed: false, detail: … }`；本包不会运行全局 `killall codex`。Windows 上只管理直接子进程，进程范围确认是 POSIX 保证。
+**清理以实际受管范围为准。** POSIX上guardian作为独立进程组leader，Codex在同组运行；创建时建立IPC lifeline，调用方突退会触发guardian有界收尾。正常调用方仍核对整个组消失。真实Codex与guardian的退出事实分别保留，未知不补exit 0。Windows Host旧路径只管理直接进程，machine入口仅支持POSIX。详见[machine协议](machine.md#cancellation-and-process-ownership)。
 
 | | |
 |---|---|
@@ -267,16 +279,21 @@ tools.subagent_codex({ description: "…", prompt: "…", run_in_background: tru
 
 ## 权限：包括只读 Review
 
-权限模式是插件的无人值守策略，不是审批提示。默认值仍然是实现任务需要的可写模式，本次没有全局改变它。
+0.8.0 默认改为 **workspace-write + never**。旧配置显式设置 full access 时保留
+显式选择；未填写权限的配置使用新默认值。工具调用只能保持配置权限、收窄为
+read-only，或从显式 full access 收窄为 workspace-write；其它变更须修改配置。
 
-| 模式 | `approvalPolicy` | `sandbox` | 用途 |
+| 模式 | approvalPolicy | sandbox | 用途 |
 |---|---|---|---|
-| `dangerously-bypass-approvals-and-sandbox` | `never` | `danger-full-access` | 默认实现任务 |
-| `approve-for-me` | `on-request` | `workspace-write` | 可写工作，批准交给 reviewer |
-| `never` | `never` | 省略 | 不弹审批，但**不是只读** |
-| `read-only` | `never` | `read-only` | 只读 review / 检查 |
+| workspace-write | never | workspace-write | 默认实现任务 |
+| read-only | never | read-only | 独立评审与只读检查 |
+| dangerously-bypass-approvals-and-sandbox | never | danger-full-access | 仅显式配置 |
+| approve-for-me | on-request | workspace-write | 兼容旧的审批reviewer策略 |
+| never | never | 省略 | 兼容旧配置，不证明沙箱范围 |
 
-`approvalPolicy: 'never'` 只表示"不向人请求批准"，不限制文件系统或执行沙箱。真正的只读 Review 需要 `sandbox: 'read-only'`；新增的 `read-only` 模式会在 `thread/start` 和 `thread/resume` 上都发送它。也可以按调用传 `permission_mode`，这样 Review 用只读、默认实现任务继续保留写权限。requested 与 effective 权限都会记录在运行结果和诊断日志里；响应忽略了请求会失败。
+machine入口只接受前三种明确沙箱模式。必需的有效cwd/model/approval/sandbox
+字段缺失、类型错误或不一致时，发送任务前失败；完整sandbox policy保留在收据。
+本轮effort只有请求被接受的证据，协议不返回effective effort，不能伪造回执。
 
 ## token usage 与限额
 
@@ -287,12 +304,12 @@ Codex 通过 `thread/tokenUsage/updated` 报告线程累计的 `total` 和最近
 - `run` 是相对观测 baseline 的增量，绝不是把通知快照相加。
 - resume 在 turn 开始前的重放会作为 baseline，不计入本次消耗。
 - resume 没有重放就收到第一条 live 快照时，报告是 `partial`，不会凭空写 0。
-- 重复/乱序快照忽略；计数回退标记 `partial`，不产生负数。
+- 重复快照不累计；异常通知、归属不明或计数回退标记 `partial`，不产生负数。
 - 其他 thread/turn 的 usage 不加进来。
 - 没有观测时是 `unknown` 且没有 `run`，不是假的 `0`；失败、超时或取消前已观测到的 usage 会保留在失败结果里。
 - `cachedInputTokens` 是 `inputTokens` 的子集，`reasoningOutputTokens` 是 `outputTokens` 的子集；字段按 Codex 原样报告，绝不重复相加。
 
-`account/rateLimits/updated` 作为 `rateLimits` 单独保存，不并入 token usage。二者都会出现在 `CodexRunOutcome` / `delegateOnce` 结果和诊断日志中。DSH 的 `SubagentResult` 与工具结果契约没有 `usage`/`rateLimits` 字段，所以 provider 和自定义工具**不发明宿主字段**：工具结果仍只有 content，后台 job 结果仍是契约规定的字符串。诊断日志是宿主可见的观测面。
+`account/rateLimits/updated` 作为 `rateLimits` 单独保存，不并入 token usage。二者都会出现在 `CodexRunOutcome` / `delegateOnce` 结果和诊断日志中。DSH 的 `SubagentResult` 与工具结果契约没有 `usage`/`rateLimits` 字段，所以 provider 和自定义工具**不发明宿主字段**：工具结果仍只有 content，后台 job 结果仍是契约规定的字符串。完整机器收据通过公开machine API/CLI取得；宿主diagnostic只保留有界元数据，不承载原始协议、输入或凭据。
 
 ## 结构化结果的校验
 
@@ -302,9 +319,11 @@ Codex 通过 `thread/tokenUsage/updated` 报告线程累计的 `total` 和最近
 
 ## 验证层次
 
+0.8.0新增guardian、公开machine入口与实际npm tarball安装检查，CI覆盖Ubuntu/macOS与Node22/24。以下真实模型记录属于**历史0.7.0基线**；本次没有重新执行0.8.0真实模型或用户桌面验证。
+
 1. **离线/封闭**：默认 `npm test`。用真实协议类和真实子进程驱动脚本化 fake app-server，覆盖启动卡死、turn 卡死、调用方取消、提前退出、resume、usage 重放、重复、只读权限、结构化校验、进程组后代和幂等 teardown。不调用模型，不碰 Codex 账号。
 2. **真实 Codex app-server**：已用安装的 Codex **0.165.0** 跑 live app-server 用例（`CODEX_SUBAGENT_LIVE=1`），**4/4 通过**：覆盖 model + effort、默认配置、persistent thread 带显式 model/cwd/read-only 覆盖续接（含 usage 重放和 effective 配置校验），以及 `output_schema` 解码。单独的 `codex exec` live 用例也通过（该文件 20/20，其中一次真实 CLI 调用）。官方 **0.166.0** 的 `ThreadResumeParams`、`ThreadResumeResponse`、`ThreadTokenUsage`、`token_usage_replay.rs` 已审阅，但没有执行 0.166 runtime。
-3. **真实 DSH desktop 端到端**：仍未运行。实现保持现有 DSH provider/tool/job 契约；桌面 smoke 仍是唯一未执行的验证层。v0.7.0 通过仓库的 tag 发布流程发布；未修改用户全局 Codex 登录/配置。
+3. **真实 DSH desktop 端到端**：仍未运行。实现保持现有 DSH provider/tool/job 契约；0.8.0真实模型与桌面smoke仍需单列。本轮未修改用户全局Codex登录或配置。
 
 ## 能力
 
@@ -317,8 +336,8 @@ Codex 通过 `thread/tokenUsage/updated` 报告线程累计的 `total` 和最近
 | schema 强约束的答案（`output_schema`，或 harness 的行配置） | ✅ 本地校验 |
 | `run_in_background` + 通过 `job_output` 看进度 | ✅ |
 | 只读 Review 权限（`read-only`） | ✅ `approvalPolicy=never` + `sandbox=read-only` |
-| token usage / model context window | ✅ 内部 outcome + 诊断日志；DSH result/tool/job 契约无 usage 字段 |
-| 账号限额 | ✅ 与 token usage 分开；内部/日志可见 |
+| token usage / model context window | ✅ 公开machine收据；DSH result/tool/job保持正式宿主格式 |
+| 账号限额 | ✅ 与 token usage 分开；公开 machine 收据可见 |
 | 带确认的进程范围清理 | ✅ POSIX；无法确认会明确报告 |
 | 期限覆盖启动与 turn；区分用户取消 | ✅ |
 | app-server 协议（握手、线程生命周期、批准决定） | ✅ |
@@ -328,4 +347,4 @@ Codex 通过 `thread/tokenUsage/updated` 报告线程累计的 `total` 和最近
 
 上面那三项拒绝**不是待补的缺口**。一次 Codex 委派是**叶子**：它**没有 DSH 子 agent**，所以"委派深度上限"没有东西可限。它的工具是 **Codex 自己的** —— shell、patch 工具、它自己的 MCP —— **不是本 harness 的**，而 **tool filter** 描述的是 DSH 工具，因此无从表达它们；要限制 Codex 请用它自己的配置。而 **persona** 是给子 agent 的系统指令，这里任务已经通过 `prompt` 给出。把任何一项声明成 `true`，都等于向 harness 承诺一个并不存在的强制力。
 
-**在协议保真度重要的场合，官方 provider 仍是更好的选择。** 本包存在，是因为它表达不了上面那两个选择；上游能表达之后，本包就该退休。
+官方 provider 的配置与结果契约满足需求时，可以直接使用官方版本。本包增加逐调用模型与思考等级配置，并给外部编排器提供公开 machine 收据。兼容性按文档列明的 DSH/Codex 基线核验；上游更新后仍需重新验证协议契约。

@@ -26,7 +26,8 @@
  * @module dsh-subagent-codex-pro/wire
  */
 
-import { resolve } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
+import { realpathSync } from 'node:fs'
 
 import type { LineTransport } from './jsonrpc.ts'
 import { TokenUsageTracker, type CodexUsageReport, type TokenUsageNotificationLike } from './usage.ts'
@@ -34,11 +35,15 @@ import { TokenUsageTracker, type CodexUsageReport, type TokenUsageNotificationLi
 /** Prefix on every error this module raises. */
 const P = 'codex-pro'
 
-/** Thread permission params per configured mode; copied verbatim. */
+/** Explicit thread permissions; approval policy never implies a sandbox. */
 const THREAD_PERMISSION_PARAMS = {
   'read-only': {
     approvalPolicy: 'never',
     sandbox: 'read-only',
+  },
+  'workspace-write': {
+    approvalPolicy: 'never',
+    sandbox: 'workspace-write',
   },
   never: { approvalPolicy: 'never' },
   'approve-for-me': {
@@ -74,14 +79,30 @@ export interface EffectiveConfiguration {
   readonly approvalPolicy?: string
   readonly approvalsReviewer?: string
   readonly sandbox?: string
+  /** Full server-reported policy; matching the mode alone does not prove its roots/network scope. */
+  readonly sandboxPolicy?: Readonly<Record<string, unknown>>
+  /** Historical thread default, not evidence of this run's per-turn effort. */
   readonly reasoningEffort?: string | null
 }
 
 /** One path's requested/effective facts, kept for observability and comparison. */
 export interface AppliedConfiguration {
+  readonly source: 'thread/start' | 'thread/resume'
   readonly requested: RequestedConfiguration
   readonly effective: EffectiveConfiguration
   readonly matched: boolean
+  /** Requested facts whose effective value is absent, malformed, or unsupported. */
+  readonly missing: readonly (keyof RequestedConfiguration)[]
+  /** Names of requested facts whose effective value differs; values are not echoed. */
+  readonly mismatches: readonly (keyof RequestedConfiguration)[]
+}
+
+/** Codex acknowledges the turn, but 0.165/0.166 do not echo its effective effort. */
+export interface TurnConfiguration {
+  readonly requestedEffort?: string
+  readonly effectiveEffort: null
+  readonly evidence: 'turn/start-request'
+  readonly accepted: boolean
 }
 
 /** Overrides sent on `thread/resume` instead of silently preserving history. */
@@ -367,9 +388,10 @@ function sandboxModeOf(value: unknown): string | undefined {
 /** Read the effective configuration fields a start/resume response carries. */
 function effectiveConfiguration(response: Record0): EffectiveConfiguration {
   const text = (field: string): string | undefined =>
-    typeof response[field] === 'string' ? response[field] as string : undefined
+    typeof response[field] === 'string' && response[field] !== '' ? response[field] as string : undefined
   const model = text('model')
-  const cwd = text('cwd')
+  const reportedCwd = text('cwd')
+  const cwd = reportedCwd !== undefined && isAbsolute(reportedCwd) ? reportedCwd : undefined
   const approvalPolicy = text('approvalPolicy')
   const approvalsReviewer = text('approvalsReviewer')
   const sandbox = sandboxModeOf(response.sandbox)
@@ -380,36 +402,47 @@ function effectiveConfiguration(response: Record0): EffectiveConfiguration {
     ...approvalPolicy === undefined ? {} : { approvalPolicy },
     ...approvalsReviewer === undefined ? {} : { approvalsReviewer },
     ...sandbox === undefined ? {} : { sandbox },
+    ...sandbox === undefined ? {} : { sandboxPolicy: structuredClone(response.sandbox) as Record0 },
     ...reasoningEffort === null || typeof reasoningEffort === 'string'
       ? { reasoningEffort: reasoningEffort as string | null }
       : {},
   }
 }
 
+/** Codex may return a physical macOS path such as /private/tmp for /tmp. */
+function sameDirectory(actual: string, requested: string): boolean {
+  if (resolve(actual) === resolve(requested)) return true
+  try { return realpathSync(actual) === realpathSync(requested) }
+  catch { return false }
+}
+
 /**
  * Compare requested facts with the effective ones and retain both.
  *
- * Missing response fields cannot prove anything; they set `matched` false but
- * are not reported as a mismatch. A present, different value is a real
- * mismatch: returning the caller's request as if it had taken effect is exactly
- * the failure mode this guard exists to prevent. The caller stores the report
- * before throwing, so a rejected resume still says what was asked for and what
- * the app-server answered.
+ * The generated 0.165/0.166 start/resume responses carry effective model, cwd,
+ * approval policy, reviewer and sandbox fields. A missing or malformed requested
+ * field is a failed capability check, not permission to proceed. Retain the
+ * facts before throwing, without echoing arbitrary protocol values in errors.
  */
 function appliedConfiguration(
+  source: AppliedConfiguration['source'],
   requested: RequestedConfiguration,
   response: Record0,
-): { readonly configuration: AppliedConfiguration, readonly mismatches: readonly string[] } {
+): AppliedConfiguration {
   const effective = effectiveConfiguration(response)
-  const mismatches: string[] = []
+  const missing: (keyof RequestedConfiguration)[] = []
+  const mismatches: (keyof RequestedConfiguration)[] = []
   const equals = (field: keyof RequestedConfiguration, actual: string, requestedValue: string): boolean =>
-    field === 'cwd' ? resolve(actual) === resolve(requestedValue) : actual === requestedValue
+    field === 'cwd' ? sameDirectory(actual, requestedValue) : actual === requestedValue
   const compare = (field: keyof RequestedConfiguration, requestedValue: string | undefined): boolean => {
     if (requestedValue === undefined) return true
     const actual = effective[field]
-    if (actual === undefined) return false
+    if (actual === undefined) {
+      missing.push(field)
+      return false
+    }
     if (!equals(field, actual, requestedValue)) {
-      mismatches.push(`${field} ${String(actual)} != ${requestedValue}`)
+      mismatches.push(field)
       return false
     }
     return true
@@ -422,9 +455,19 @@ function appliedConfiguration(
     compare('sandbox', requested.sandbox),
   ]
   return {
-    configuration: { requested, effective, matched: verified.every(Boolean) && mismatches.length === 0 },
+    source, requested, effective, matched: verified.every(Boolean), missing,
     mismatches,
   }
+}
+
+/** Refuse unproven configuration before any user task is sent. */
+function requireAppliedConfiguration(configuration: AppliedConfiguration): void {
+  if (configuration.matched) return
+  const detail = [
+    ...(configuration.missing.length === 0 ? [] : [`missing or invalid ${configuration.missing.join(', ')}`]),
+    ...(configuration.mismatches.length === 0 ? [] : [`mismatched ${configuration.mismatches.join(', ')}`]),
+  ].join('; ')
+  throw new Error(`${P}: ${configuration.source} did not apply the requested configuration: ${detail}`)
 }
 
 /**
@@ -447,6 +490,7 @@ export class CodexAppServerWire {
   #earlyTurnNotifications: { method: string; params: unknown; order: number }[] = []
   /** Usage notifications that arrived before thread/start or thread/resume returned. */
   #earlyUsageNotifications: TokenUsageNotificationLike[] = []
+  #earlyUsageOverflow = false
   #lastFinalAnswer: string | undefined
   /** Stable partial answer text that later assistant output or tool calls may follow. */
   #lastPartialAnswer: string | undefined
@@ -468,6 +512,7 @@ export class CodexAppServerWire {
   #rateLimitObservations = 0
   /** Requested/effective facts of the one start or resume this wire performed. */
   #configuration: AppliedConfiguration | undefined
+  #turnConfiguration: TurnConfiguration | undefined
   /** Narrates notable events, for a caller that reports progress. */
   #onProgress: ((text: string) => void) | undefined
 
@@ -581,16 +626,11 @@ export class CodexAppServerWire {
         + `where ${this.#threadMode} was asked for`)
     }
     this.#threadId = id
-    this.#usage.resetForNewThread()
+    this.#usage.resetForNewThread(id)
     this.#flushEarlyUsage()
-    const applied = appliedConfiguration(requested, response)
-    this.#configuration = applied.configuration
-    this.#progress(`thread ${id} (${this.#threadMode}) configuration `
-      + `${JSON.stringify(applied.configuration.requested)} -> ${JSON.stringify(applied.configuration.effective)}`)
-    if (applied.mismatches.length > 0) {
-      throw new Error(`${P}: thread/start did not apply the requested configuration: `
-        + applied.mismatches.join('; '))
-    }
+    this.#configuration = appliedConfiguration('thread/start', requested, response)
+    this.#progress(`thread ${id} (${this.#threadMode}) configuration matched=${this.#configuration.matched}`)
+    requireAppliedConfiguration(this.#configuration)
   }
 
   /**
@@ -642,16 +682,11 @@ export class CodexAppServerWire {
       if (id !== threadId) throw new Error(`${P}: thread/resume answered for ${id}, not ${threadId}`)
     }
     this.#threadId = threadId
-    this.#usage.resetForResume()
+    this.#usage.resetForResume(threadId)
     this.#flushEarlyUsage()
-    const applied = appliedConfiguration(requested, response)
-    this.#configuration = applied.configuration
-    this.#progress(`thread ${threadId} (resumed) configuration `
-      + `${JSON.stringify(applied.configuration.requested)} -> ${JSON.stringify(applied.configuration.effective)}`)
-    if (applied.mismatches.length > 0) {
-      throw new Error(`${P}: thread/resume did not apply the requested configuration: `
-        + applied.mismatches.join('; '))
-    }
+    this.#configuration = appliedConfiguration('thread/resume', requested, response)
+    this.#progress(`thread ${threadId} (resumed) configuration matched=${this.#configuration.matched}`)
+    requireAppliedConfiguration(this.#configuration)
   }
 
   /**
@@ -728,6 +763,11 @@ export class CodexAppServerWire {
     return this.#threadId
   }
 
+  /** Authoritative turn id, adopted only after the start response agrees. */
+  get turnId(): string | undefined {
+    return this.#turnId
+  }
+
   /** Token usage attributable to this one delegation; never a zero guess. */
   get usageReport(): CodexUsageReport {
     return this.#usage.report()
@@ -744,6 +784,10 @@ export class CodexAppServerWire {
   /** The requested and effective configuration of the one start/resume. */
   get configuration(): AppliedConfiguration | undefined {
     return this.#configuration
+  }
+
+  get turnConfiguration(): TurnConfiguration | undefined {
+    return this.#turnConfiguration
   }
 
   /**
@@ -765,6 +809,14 @@ export class CodexAppServerWire {
     const completion = Promise.withResolvers<TurnCompletion>()
     this.#turnCompleted = completion
     const threadId = this.#threadId
+    if (threadId === undefined || this.#configuration?.matched !== true) {
+      throw new Error(`${P}: cannot start a turn without verified thread configuration`)
+    }
+    this.#usage.startTurnRequest()
+    this.#turnConfiguration = {
+      ...(effort === undefined ? {} : { requestedEffort: effort }),
+      effectiveEffort: null, evidence: 'turn/start-request', accepted: false,
+    }
     try {
       const turn = object(
         object(
@@ -791,6 +843,7 @@ export class CodexAppServerWire {
       )
       this.#commitTurnId(string(turn.id, 'turn/start turn id'))
       this.#usage.beginTurn(string(turn.id, 'turn/start turn id'))
+      this.#turnConfiguration = { ...this.#turnConfiguration, accepted: true }
     } catch (error: unknown) {
       this.#recordFailure({ stage: 'turn-start', category: 'unknown' })
       throw error
@@ -1003,8 +1056,13 @@ export class CodexAppServerWire {
   /** Replay usage notifications that raced the start/resume response. */
   #flushEarlyUsage(): void {
     if (this.#threadId === undefined) return
+    if (this.#earlyUsageOverflow) this.#usage.observeInvalid()
     const pending = this.#earlyUsageNotifications.splice(0)
     for (const notification of pending) {
+      if (typeof notification.threadId !== 'string' || notification.threadId === '') {
+        this.#usage.observeInvalid()
+        continue
+      }
       if (notification.threadId !== this.#threadId) continue
       const tokenUsage = notification.tokenUsage
       if (typeof tokenUsage !== 'object' || tokenUsage === null || Array.isArray(tokenUsage)) {
@@ -1020,14 +1078,20 @@ export class CodexAppServerWire {
     const fields = (params ?? {}) as Record0
     if (method === 'thread/tokenUsage/updated') {
       if (this.#threadId === undefined) {
-        this.#earlyUsageNotifications.push({
-          threadId: fields.threadId,
-          turnId: fields.turnId,
-          tokenUsage: fields.tokenUsage,
-        })
+        if (this.#earlyUsageNotifications.length < 128) {
+          this.#earlyUsageNotifications.push({
+            threadId: fields.threadId,
+            turnId: fields.turnId,
+            tokenUsage: fields.tokenUsage,
+          })
+        } else this.#earlyUsageOverflow = true
         return
       }
-      if (typeof fields.threadId !== 'string' || fields.threadId !== this.#threadId) return
+      if (typeof fields.threadId !== 'string' || fields.threadId === '') {
+        this.#usage.observeInvalid()
+        return
+      }
+      if (fields.threadId !== this.#threadId) return
       const tokenUsage = fields.tokenUsage
       if (typeof tokenUsage !== 'object' || tokenUsage === null || Array.isArray(tokenUsage)) {
         this.#usage.observeInvalid()
