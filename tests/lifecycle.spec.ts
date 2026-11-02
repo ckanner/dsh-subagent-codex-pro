@@ -220,6 +220,15 @@ async function rejectsWithin<T>(promise: Promise<T>, ms: number): Promise<Error>
   ])
 }
 
+/** Keep cross-platform failures actionable without dumping scripted task text. */
+function lifecycleDiagnostic(value: {
+  readonly cleanup?: unknown
+  readonly execution?: unknown
+  readonly diagnostic?: unknown
+} | undefined): string {
+  return JSON.stringify({ cleanup: value?.cleanup, execution: value?.execution, diagnostic: value?.diagnostic })
+}
+
 test('a hung initialize is stopped by the total deadline', async () => {
   const command = fakeServer('hang-initialize')
   const started = Date.now()
@@ -271,7 +280,7 @@ test('a hung turn settles as a timeout after publication', async () => {
   const outcome = await run.result
   assert.equal(outcome.stopReason, 'timeout')
   assert.match(outcome.diagnostic ?? '', /deadline/)
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
   assert.equal(outcome.execution.runId, run.id)
   assert.equal(outcome.execution.timedOut, true)
   assert.equal(outcome.execution.cancelled, false)
@@ -321,7 +330,7 @@ test('a completed turn reports its usage delta and context window', async () => 
     cwd: '/tmp', command, permissionMode: 'never', runTimeoutMs: 5_000, disposeGraceMs: 100,
   }, new AbortController().signal)
   const outcome = await run.result
-  assert.equal(outcome.stopReason, 'completed')
+  assert.equal(outcome.stopReason, 'completed', lifecycleDiagnostic(outcome))
   assert.equal(outcome.usage.status, 'complete')
   assert.equal(outcome.usage.run?.totalTokens, 300)
   assert.equal(outcome.usage.modelContextWindow, 272_000)
@@ -353,7 +362,7 @@ test('a resumed thread treats its replay as baseline and reports only the increm
     runTimeoutMs: 5_000, disposeGraceMs: 100,
   }, new AbortController().signal)
   const outcome = await run.result
-  assert.equal(outcome.stopReason, 'completed')
+  assert.equal(outcome.stopReason, 'completed', lifecycleDiagnostic(outcome))
   assert.equal(outcome.usage.replayedBaseline, true)
   assert.equal(outcome.usage.run?.totalTokens, 300)
   assert.equal(outcome.usage.threadTotal?.totalTokens, 1300)
@@ -365,7 +374,7 @@ test('another turn notification after turn/start cannot invent a complete resume
     threadMode: 'persistent', resumeThreadId: 'thread-1', runTimeoutMs: 5_000, disposeGraceMs: 100,
   }, new AbortController().signal)
   const outcome = await run.result
-  assert.equal(outcome.stopReason, 'completed')
+  assert.equal(outcome.stopReason, 'completed', lifecycleDiagnostic(outcome))
   assert.equal(outcome.usage.status, 'partial')
   assert.equal(outcome.usage.replayedBaseline, false)
   assert.notEqual(outcome.usage.run?.totalTokens, 300)
@@ -395,7 +404,7 @@ test('a descendant that ignores SIGTERM is cleaned up with the owned group', asy
   }, new AbortController().signal)
   const outcome = await run.result
   assert.equal(outcome.stopReason, 'timeout')
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
   const childPid = Number(readFileSync(pidFile, 'utf8'))
   assert.ok(Number.isInteger(childPid) && childPid > 0)
   await new Promise((resolve) => setTimeout(resolve, 100))
@@ -415,7 +424,7 @@ test('delegateOnce returns the answer, thread, usage and a confirmed cleanup', a
   assert.equal(seenStarts.length, 1)
   assert.equal(result.threadId, 'thread-1')
   assert.equal(result.usage.status, 'unknown')
-  assert.equal(result.cleanup.confirmed, true)
+  assert.equal(result.cleanup.confirmed, true, lifecycleDiagnostic(result))
   assert.ok(result.configuration !== undefined)
 })
 
@@ -445,7 +454,7 @@ test('delegateOnce fails a schema-constrained run whose answer is not valid JSON
       assert.ok(error instanceof CodexDelegationFailure)
       assert.match(error.message, /not valid JSON/)
       assert.ok(error.outcome?.schemaError !== undefined)
-      assert.equal(error.outcome?.cleanup.confirmed, true)
+      assert.equal(error.outcome?.cleanup.confirmed, true, lifecycleDiagnostic(error.outcome))
       return true
     },
   )
@@ -462,7 +471,7 @@ test('a failed delegation keeps the usage it observed before the timeout', async
       assert.ok(error instanceof CodexDelegationFailure)
       assert.equal(error.outcome?.stopReason, 'timeout')
       assert.equal(error.outcome?.usage.run?.totalTokens, 300)
-      assert.equal(error.outcome?.cleanup.confirmed, true)
+      assert.equal(error.outcome?.cleanup.confirmed, true, lifecycleDiagnostic(error.outcome))
       return true
     },
   )
@@ -477,8 +486,8 @@ test('runCodexOnce reports the published id and outcome', async () => {
     onStart: (id) => { ids.push(id) },
   })
   assert.equal(ids.length, 1)
-  assert.equal(outcome.stopReason, 'completed')
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.stopReason, 'completed', lifecycleDiagnostic(outcome))
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
 })
 
 test('textTask and the argv helper reject malformed tasks and name the protocol', () => {
@@ -507,7 +516,7 @@ test('the provider path maps the same outcome without inventing DSH fields', asy
     },
   })
   const result = await handle.result
-  assert.equal(result.stopReason, 'completed')
+  assert.equal(result.stopReason, 'completed', lifecycleDiagnostic(result))
   assert.deepEqual(result.structured, { verdict: 'pass', count: 2 })
   assert.equal('usage' in result, false)
   await handle.dispose()
@@ -541,7 +550,7 @@ test('public cancellation records cancellation independently from timeout', asyn
   assert.equal(outcome.stopReason, 'aborted')
   assert.equal(outcome.execution.cancelled, true)
   assert.equal(outcome.execution.timedOut, false)
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
 })
 
 test('caller cancellation during confirmed-in-progress cleanup cannot become completed', async () => {
@@ -563,7 +572,7 @@ test('caller cancellation during confirmed-in-progress cleanup cannot become com
   assert.equal(outcome.execution.cancelled, true)
   assert.equal(outcome.execution.timedOut, false)
   assert.equal(outcome.usage.status, 'partial')
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
 })
 
 test('output becoming incomplete during cleanup invalidates a completed model turn', async () => {
@@ -577,7 +586,7 @@ test('output becoming incomplete during cleanup invalidates a completed model tu
   assert.equal(outcome.execution.truncated, true)
   assert.equal(outcome.execution.failure?.category, 'output-incomplete')
   assert.equal(outcome.usage.status, 'partial')
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
 })
 
 test('an output limit during unpublished startup is recorded and cleaned up', async () => {
@@ -590,7 +599,7 @@ test('an output limit during unpublished startup is recorded and cleaned up', as
   assert.equal(error.execution?.truncated, true)
   assert.equal(error.execution?.timedOut, false)
   assert.equal(error.execution?.cancelled, false)
-  assert.equal(error.cleanup?.confirmed, true)
+  assert.equal(error.cleanup?.confirmed, true, lifecycleDiagnostic(error))
 })
 
 test('a model final answer cannot hide a real nonzero app-server exit', async () => {
@@ -603,7 +612,7 @@ test('a model final answer cannot hide a real nonzero app-server exit', async ()
   assert.equal(outcome.execution.exitCode, 23)
   assert.equal(outcome.execution.signal, null)
   assert.equal(outcome.execution.failure?.category, 'process')
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
 })
 
 test('invalid lifecycle budgets and pre-start cancellation never spawn an app-server', async () => {
@@ -622,7 +631,7 @@ test('invalid lifecycle budgets and pre-start cancellation never spawn an app-se
       assert.equal(error.facts.category, 'invalid-request')
       assert.equal(error.execution?.pid, null)
       assert.equal(error.execution?.supervisorPid, null)
-      assert.equal(error.cleanup?.confirmed, true)
+      assert.equal(error.cleanup?.confirmed, true, lifecycleDiagnostic(error))
       return true
     })
   }
@@ -669,6 +678,73 @@ test('an unconfirmed group cannot complete through the public provider or dispos
   }
 })
 
+for (const probe of ['transient', 'persistent'] as const) {
+  test(`a group signal EPERM requires a later ESRCH to confirm cleanup (${probe} inspection EPERM)`, {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const actualKill = process.kill.bind(process)
+    let groupPid: number | undefined
+    let killSent = false
+    let inspectionErrors = 0
+    let observedEsrch = false
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number): true => {
+      if (pid >= 0) return actualKill(pid, signal)
+      if (groupPid === undefined) {
+        groupPid = -pid
+        pids.push(groupPid)
+      }
+      assert.equal(pid, -groupPid, 'the fixture must signal only its own run group')
+      // Hold the first tier in this caller so the guardian's own deadline
+      // cannot win the race before the injected KILL error is exercised.
+      if (signal === 'SIGTERM') return true
+      if (signal === 'SIGKILL') {
+        actualKill(pid, signal)
+        killSent = true
+        const error = new Error('fixture signal raced group exit') as NodeJS.ErrnoException
+        error.code = 'EPERM'
+        throw error
+      }
+      if (signal === 0 && killSent && (probe === 'persistent' || inspectionErrors < 2)) {
+        inspectionErrors++
+        const error = new Error('fixture cannot yet inspect exiting group') as NodeJS.ErrnoException
+        error.code = 'EPERM'
+        throw error
+      }
+      try { return actualKill(pid, signal) } catch (error: unknown) {
+        if (signal === 0 && (error as NodeJS.ErrnoException).code === 'ESRCH') observedEsrch = true
+        throw error
+      }
+    }) as typeof process.kill
+    try {
+      const run = await startCodexRun([{ type: 'text', text: 'probe' }], {
+        cwd: '/tmp', command: fakeServer('usage'), permissionMode: 'read-only',
+        runTimeoutMs: 5_000, disposeGraceMs: 50,
+      }, new AbortController().signal)
+      const outcome = await run.result
+      const diagnostic = lifecycleDiagnostic(outcome)
+      assert.equal(killSent, true, diagnostic)
+      assert.ok(inspectionErrors >= 2, diagnostic)
+      if (probe === 'transient') {
+        assert.equal(observedEsrch, true, 'only a real kernel ESRCH may confirm cleanup')
+        assert.equal(outcome.cleanup.confirmed, true, diagnostic)
+        assert.equal(outcome.stopReason, 'completed', diagnostic)
+        assert.equal(outcome.usage.status, 'complete', diagnostic)
+      } else {
+        assert.equal(observedEsrch, false, diagnostic)
+        assert.equal(outcome.cleanup.confirmed, false, diagnostic)
+        assert.equal(outcome.stopReason, 'error', diagnostic)
+        assert.equal(outcome.usage.status, 'partial', diagnostic)
+        assert.match(outcome.cleanup.detail ?? '', /fixture signal raced group exit/, diagnostic)
+        assert.match(outcome.cleanup.detail ?? '', /fixture cannot yet inspect exiting group/, diagnostic)
+      }
+      assert.ok(groupPid !== undefined)
+      assert.throws(() => actualKill(-groupPid, 0), /ESRCH/, diagnostic)
+    } finally {
+      process.kill = actualKill
+    }
+  })
+}
+
 /** Poll only a fixture-owned record/process, with an outer test deadline. */
 async function waitFor(check: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
   const until = performance.now() + timeoutMs
@@ -689,6 +765,10 @@ function readPid(path: string): number | undefined {
 function groupGone(pid: number): boolean {
   try { process.kill(-pid, 0); return false } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true
+    // Darwin may keep a group briefly after its last signalable member exits.
+    // EPERM proves neither liveness nor disappearance: keep polling, bounded
+    // by waitFor, until an independent ESRCH confirms this owned group is gone.
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return false
     throw error
   }
 }
@@ -784,7 +864,7 @@ test('a dead leader cannot keep timeout=0 pending through a descendant holding s
   assert.equal(outcome.execution.exitCode, 7)
   assert.equal(outcome.execution.timedOut, false)
   assert.equal(outcome.execution.truncated, true)
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
   assert.throws(() => process.kill(readPid(childPidFile)!, 0), /ESRCH/)
 })
 
@@ -829,7 +909,7 @@ test(`a killed guardian cannot leave timeout=0 waiting on its still-live Codex p
   assert.equal(outcome.execution.signal, null)
   assert.equal(outcome.execution.timedOut, false)
   assert.equal(outcome.execution.failure?.stage, 'supervisor')
-  assert.equal(outcome.cleanup.confirmed, true)
+  assert.equal(outcome.cleanup.confirmed, true, lifecycleDiagnostic(outcome))
   assert.equal(groupGone(guardianPid), true)
   assert.throws(() => process.kill(appServerPid, 0), /ESRCH/)
 })
@@ -883,7 +963,7 @@ test('signal denial returns a failed receipt and releases the caller while the g
   assert.deepEqual(status, { code: 0, signal: null }, stderr)
   const outcome = JSON.parse(stdout)
   assert.equal(outcome.stopReason, 'error')
-  assert.equal(outcome.cleanup.confirmed, false)
+  assert.equal(outcome.cleanup.confirmed, false, lifecycleDiagnostic(outcome))
   assert.match(outcome.cleanup.detail, /injected signal denial/)
   assert.equal(outcome.usage.status, 'partial')
   await waitFor(() => groupGone(groupPid), 'guardian cleanup after releasing a failed lease')

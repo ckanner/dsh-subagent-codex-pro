@@ -512,10 +512,15 @@ function spawnAppServer(spec: CodexRunSpec): ManagedChild {
         await delay(25)
         state = groupState()
       }
-      if (signalErrors.length > 0) return { confirmed: false, detail: signalErrors.join('; ') }
-      return state.alive === false
-        ? { confirmed: true }
-        : { confirmed: false, detail: state.detail ?? 'the owned process group was still alive after SIGKILL' }
+      // A signal can race the guardian's own group KILL. In particular, Darwin
+      // can return EPERM while a group contains only exiting/zombie members.
+      // That error is not proof of disappearance, but a later independent
+      // ESRCH is. Do not let a historical signal error override that proof.
+      if (state.alive === false) return { confirmed: true }
+      return {
+        confirmed: false,
+        detail: [...signalErrors, state.detail ?? 'the owned process group was still alive after SIGKILL'].join('; '),
+      }
     })()
     return termination
   }

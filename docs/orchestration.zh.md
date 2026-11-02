@@ -63,6 +63,12 @@ worktree 解决工作区与 index 相互干扰，不是权限沙箱；仍要设�
 Draft、Ready、Merged、Published 是不同状态。模型说完成、某次测试绿灯、
 Flywheel 的 local completed，都不能直接充当“允许合并 main”的判断。
 
+你提到的 [mattpocock/skills](https://github.com/mattpocock/skills) 也可以作为
+准备和审查方法的参考：当前 `to-spec` 整理已知需求与测试边界，`to-tickets`
+按可独立验证的端到端行为拆分任务并明确依赖，`implement-spec` 使用 integration
+branch、独立 worktree 和 Draft PR。Flywheel 可以吸收这些方法；运行时状态与
+提交仍由 Go 持有，避免同时引入第二套编排状态机。
+
 依据：
 
 - [Git worktree](https://git-scm.com/docs/git-worktree)

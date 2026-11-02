@@ -37,7 +37,7 @@ test('a missing Codex executable fails the run without an unhandled rejection', 
         assert.equal(error.execution?.pid, null)
         assert.equal(error.execution?.exitCode, null)
         assert.equal(error.execution?.signal, null)
-        assert.equal(error.cleanup?.confirmed, true)
+        assert.equal(error.cleanup?.confirmed, true, JSON.stringify({ cleanup: error.cleanup, execution: error.execution }))
         return true
       },
     )

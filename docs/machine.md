@@ -131,6 +131,12 @@ alive indefinitely. The guardian can then attempt its independent cleanup. The
 receipt retains cleanup.confirmed=false and unknown process facts; that later
 attempt is not evidence that the original cleanup succeeded.
 
+A signal error also does not invalidate a later independent absence check.
+Darwin can return EPERM while a group still exists but its members are being
+reaped; the [XNU implementation](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_sig.c#L1675-L1721)
+filters zombie members. EPERM remains unknown and is retried within the same
+cleanup budget. Only a later ESRCH confirms the owned group is gone.
+
 Machine execution requires POSIX and rejects Windows before spawning Codex;
 capabilities reports supported=false there. Processes that deliberately escape
 with a new session/group require a stronger external containment boundary. The
