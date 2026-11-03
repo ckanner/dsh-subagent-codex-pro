@@ -161,6 +161,11 @@ export interface CodexRunOutcome {
   readonly stopReason: CodexStopReason
   readonly diagnostic?: string
   /**
+   * Bounded, package-generated approval/sandbox note, safe for Host diagnostics.
+   * Raw server messages and task text are never copied here.
+   */
+  readonly approvalDiagnostic?: string
+  /**
    * The thread this run used.
    *
    * Reported for every outcome, including a failed one: a persistent thread that
@@ -290,6 +295,11 @@ function describeFacts(facts: FailureFacts): string {
 /** Normalise an unknown throwable. */
 function thrown(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
+}
+
+/** Append a bounded reason to an optional diagnostic. */
+function appendDiagnostic(diagnostic: string | undefined, detail: string): string {
+  return diagnostic === undefined ? detail : `${diagnostic}; ${detail}`
 }
 
 /** A valid snapshot before interruption is a known lower bound, not a final bill. */
@@ -823,7 +833,8 @@ export async function startCodexRun(
       : timedOut ? 'timeout'
         : callerAborted ? 'aborted'
           : turn?.stopReason ?? 'error'
-    let diagnostic = wire.collectDiagnostic()
+    const approvalDiagnostic = wire.collectDiagnostic()
+    let diagnostic = approvalDiagnostic
     let structured: unknown
     let schemaError: string | undefined
 
@@ -831,13 +842,14 @@ export async function startCodexRun(
     if (child.supervisorFailed()) {
       if (stopReason === 'completed') stopReason = 'error'
       failure = { stage: 'supervisor', category: 'process' }
-      diagnostic = 'Codex guardian exited before cleanup was requested'
+      diagnostic = appendDiagnostic(diagnostic, 'Codex guardian exited before cleanup was requested')
     }
     if ((processFacts.exitCode !== null && processFacts.exitCode !== 0)
       || (processFacts.signal !== null && !['SIGTERM', 'SIGKILL'].includes(processFacts.signal))) {
       if (stopReason === 'completed') stopReason = 'error'
       failure = { stage: 'process', category: 'process' }
-      diagnostic = `app-server exited unexpectedly (code=${String(processFacts.exitCode)}, signal=${String(processFacts.signal)})`
+      diagnostic = appendDiagnostic(diagnostic,
+        `app-server exited unexpectedly (code=${String(processFacts.exitCode)}, signal=${String(processFacts.signal)})`)
     }
 
     if (spec.outputSchema !== undefined && stopReason === 'completed') {
@@ -889,6 +901,7 @@ export async function startCodexRun(
       output,
       stopReason,
       ...(diagnostic === undefined ? {} : { diagnostic }),
+      ...(approvalDiagnostic === undefined ? {} : { approvalDiagnostic }),
       threadId: wire.threadId,
       images: observedImages,
       usage,

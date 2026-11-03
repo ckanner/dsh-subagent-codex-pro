@@ -27,9 +27,15 @@ for await (const line of createInterface({ input: process.stdin })) {
       reasoningEffort: null,
     }
     if (mode === 'missing-model') delete result.model
+    if (mode === 'wrong-ephemeral') result.thread.ephemeral = false
     reply(message.id, result)
   } else if (message.method === 'turn/start') {
     reply(message.id, { turn: { id: 'machine-turn' } })
+    if (mode === 'declined') {
+      send({ jsonrpc: '2.0', id: 700, method: 'item/commandExecution/requestApproval',
+        params: { threadId: p.threadId, turnId: 'machine-turn', itemId: 'item-1',
+          availableDecisions: ['decline'] } })
+    }
     if (mode === 'turn-hang') continue
     setImmediate(() => {
       for (const total of [100, 140, 140]) notify('thread/tokenUsage/updated', {
@@ -40,7 +46,8 @@ for await (const line of createInterface({ input: process.stdin })) {
         threadId: p.threadId, turnId: 'machine-turn', tokenUsage: { total: usage(-1) },
       })
       notify('item/completed', { threadId: p.threadId, turnId: 'machine-turn',
-        item: { type: 'agentMessage', phase: 'final_answer', text: '{"message":"MACHINE_OK"}' } })
+        item: { type: 'agentMessage', phase: 'final_answer',
+          text: mode === 'large-final' ? '{"message":"' + 'X'.repeat(300_000) + '"}' : '{"message":"MACHINE_OK"}' } })
       notify('turn/completed', { threadId: p.threadId, turn: { id: 'machine-turn', status: 'completed' } })
     })
   }

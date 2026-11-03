@@ -458,11 +458,15 @@ export class CodexExecProvider implements SubagentProviderLike {
         }
         // DSH diagnostics are bounded metadata, never raw server messages,
         // prompts, paths, environment values, or structured answer contents.
+        const failure = outcome.execution.failure
         const diagnostic = [
           ...(outcome.stopReason === 'completed' ? [] : ['codex-pro: run ended as ' + outcome.stopReason]),
           ...(outcome.cleanup.confirmed ? [] : ['process cleanup could not be confirmed']),
           ...(outcome.schemaError === undefined ? [] : ['structured output did not satisfy the requested schema']),
-        ].join('; ')
+          ...(failure === null ? [] : [`failure: ${failure.stage}/${failure.category}`
+            + (failure.httpStatus === undefined ? '' : ` (HTTP ${String(failure.httpStatus)})`)]),
+          ...(outcome.approvalDiagnostic === undefined ? [] : [outcome.approvalDiagnostic]),
+        ].join('; ').slice(0, 4096)
         return {
           output: outcome.output,
           // The harness's own vocabulary has no `timeout`; its `aborted` is what
@@ -881,6 +885,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         modelSelectionEnabled: selection,
         backgroundEnabled: jobs !== undefined,
         defaultThreadMode: resolved.threadMode,
+        permissionMode: resolved.permissionMode,
         threadControlEnabled: true,
         ...(resolved.model === undefined ? {} : { model: resolved.model }),
         ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),

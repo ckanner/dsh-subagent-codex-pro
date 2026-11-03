@@ -4,6 +4,13 @@ import { readFileSync } from 'node:fs'
 import { MachineInputError, parseMachineRequest, runMachine } from './machine.ts'
 
 const MAX_INPUT_BYTES = 1024 * 1024
+// A consumer may close the read end before the receipt is written. EPIPE is a
+// consumer choice, not a crash; exit non-zero so the outer owner sees the lost
+// receipt without an unhandled stack. Other stdout errors remain fatal.
+process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EPIPE') process.exit(1)
+  throw error
+})
 const argv = process.argv.slice(2)
 const controller = new AbortController()
 let cancelledBy: 'SIGTERM' | 'SIGINT' | undefined

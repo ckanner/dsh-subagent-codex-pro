@@ -94,22 +94,24 @@ function count(value: unknown): value is number {
 }
 
 /**
- * Validate the complete breakdown emitted by the supported 0.165/0.166
- * protocol. Every counter is required in its generated response type. Missing
- * observations are not evidence of zero usage, including for cache writes.
+ * Validate a reported breakdown. The five primary counters must be present and
+ * valid. `cacheWriteInputTokens` is optional in the protocol schema with a
+ * default of zero, so an omitted value is normalized to zero rather than
+ * turning an otherwise valid observation into unknown usage.
  */
 function normalizeBreakdown(value: unknown): TokenUsageBreakdown | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
+  const cacheWrite = record.cacheWriteInputTokens === undefined ? 0 : record.cacheWriteInputTokens
   if (!count(record.totalTokens) || !count(record.inputTokens) || !count(record.cachedInputTokens)
-    || !count(record.outputTokens) || !count(record.reasoningOutputTokens) || !count(record.cacheWriteInputTokens)) {
+    || !count(record.outputTokens) || !count(record.reasoningOutputTokens) || !count(cacheWrite)) {
     return undefined
   }
   return {
     totalTokens: record.totalTokens,
     inputTokens: record.inputTokens,
     cachedInputTokens: record.cachedInputTokens,
-    cacheWriteInputTokens: record.cacheWriteInputTokens,
+    cacheWriteInputTokens: cacheWrite,
     outputTokens: record.outputTokens,
     reasoningOutputTokens: record.reasoningOutputTokens,
   }

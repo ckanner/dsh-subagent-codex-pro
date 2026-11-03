@@ -690,6 +690,56 @@ test('token usage is folded from cumulative totals and rate limits stay separate
   assert.deepEqual(wire.rateLimitsReport.latest, { primary: { usedPercent: 12 } })
 })
 
+test('a replay after turn/start request is still the resumed baseline', async () => {
+  const breakdown = (n: number) => ({
+    totalTokens: n, inputTokens: n - 10, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    outputTokens: 10, reasoningOutputTokens: 0,
+  })
+  const { wire, peer } = harness({
+    respond: (method, params, self) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/resume') {
+        return {
+          thread: { id: 'thread-7', ephemeral: false },
+          model: params && (params as Record<string, unknown>).model,
+          cwd: '/work', approvalPolicy: 'never', sandbox: { type: 'readOnly' },
+        }
+      }
+      if (method === 'turn/start') {
+        // The real 0.165 replay can arrive after the request but before its
+        // response; the wire must buffer it until the turn id is authoritative.
+        self.notify('thread/tokenUsage/updated', {
+          threadId: 'thread-7', turnId: 'old-turn',
+          tokenUsage: { total: breakdown(1000), last: breakdown(10), modelContextWindow: 272000 },
+        })
+        setImmediate(() => {
+          self.notify('thread/tokenUsage/updated', {
+            threadId: 'thread-7', turnId: 'turn-1',
+            tokenUsage: { total: breakdown(1300), last: breakdown(300), modelContextWindow: 272000 },
+          })
+          self.notify('item/completed', { threadId: 'thread-7', turnId: 'turn-1',
+            item: { type: 'agentMessage', phase: 'final_answer', text: 'FINAL' } })
+          self.notify('turn/completed', { threadId: 'thread-7', turn: { id: 'turn-1', status: 'completed' } })
+        })
+        return { turn: { id: 'turn-1' } }
+      }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  peer.pump()
+  await wire.resumeThread('thread-7', { model: 'gpt-6.1-terra', cwd: '/work', permission: 'read-only' })
+  peer.pump()
+  const running = wire.runTurn(['go'])
+  await new Promise((resolve) => { setImmediate(resolve) })
+  peer.pump()
+  await running
+  const usage = wire.usageReport
+  assert.equal(usage.status, 'complete')
+  assert.equal(usage.replayedBaseline, true)
+  assert.equal(usage.run?.totalTokens, 300)
+})
+
 test('a resumed thread treats a pre-turn usage replay as a baseline', async () => {
   const breakdown = (n: number) => ({
     totalTokens: n, inputTokens: n, cachedInputTokens: 0, cacheWriteInputTokens: 0,

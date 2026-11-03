@@ -13,8 +13,8 @@ npm install dsh-subagent-codex-pro@0.8.0
 npx --no-install codex-pro-machine --capabilities
 ```
 
-For an unpublished PR, build and pack the reviewed checkout, then install that
-tarball in a separate test project. A PR is not evidence that npm has this version.
+For a source checkout, build and pack it, then install that tarball in a
+separate test project. A checkout is not evidence that npm has this version.
 Node 22.18+ is required. The Codex executable and its normal authentication must
 already be available; this package neither installs Codex nor copies credentials.
 Use an absolute command path when a desktop process has a different PATH.
@@ -63,10 +63,13 @@ never silently changes to a new thread after failure. Execute and independent
 review should use fresh calls. Orchestrators, rather than model conversation
 history, own retries and durable task state.
 
-The CLI prints exactly one JSON result on stdout. App-server diagnostics may go
+The CLI prints exactly one JSON object on stdout. App-server diagnostics may go
 to stderr. Exit 0 means a completed turn and confirmed cleanup; exit 1 means a
-failed run, exit 2 an invalid input envelope, and 130/143 an observed SIGINT/
-SIGTERM after cleanup. Do not infer success from a text message or exit code alone.
+failed run or a consumer that closed stdout; exit 2 an invalid input envelope.
+130/143 can accompany the result-shaped cancellation receipt when a signal is
+observed during the run, or the `type: error` envelope when the signal arrives
+before a request/run exists (for example while reading stdin). Inspect the
+envelope; do not infer success from a text message or exit code alone.
 
 ## JavaScript API
 
@@ -99,6 +102,7 @@ and exit 2. It is not a started run.
 | outcome.configuration | requested/effective, source, missing fields, mismatches, matched and full observed sandboxPolicy |
 | outcome.turnConfiguration | Requested effort and whether turn/start accepted it; effectiveEffort stays null because the protocol does not echo it |
 | outcome.execution | run/thread/turn IDs, timestamps, elapsed duration, direct-child/driver pid (the installed Codex launcher may have a native server child), mirrored exit/signal, supervisor facts, timeout/cancel/truncation/spawn/failure facts |
+| outcome.approvalDiagnostic | Bounded package-generated unattended approval/sandbox note; never raw server output or task text |
 | outcome.cleanup | Confirmation of the owned process range's disappearance, with a reason when unconfirmed |
 | outcome.usage | complete/partial/unknown; attributable run delta and thread totals, never summed cumulative snapshots |
 | outcome.rateLimits | Account limits, separate from token usage and cost |
@@ -172,8 +176,8 @@ Changing a provider string alone does not implement that consumer.
 The default tests are offline and use real scripted child processes. CI covers
 Ubuntu/macOS with Node 22/24, then installs an actual npm tarball and tests the
 public export, installed CLI and compiled guardian. Live model tests require
-CODEX_SUBAGENT_LIVE=1. The 0.7.0 live-test record is historical evidence, not a
-claim that this guardian and 0.8.0 have run on the user's Mac or account.
+CODEX_SUBAGENT_LIVE=1. The 0.8.0 live app-server cases pass on Codex 0.165.0;
+this is not a claim that the user's DSH Desktop profile has loaded the package.
 
 - [DSH rc.5 Host types](https://github.com/deepseek-ai/deepseek-harness/blob/b830ec950faba0a46dda564be3e2d854afed94f1/packages/subagent/subagent/src/types.ts)
 - [DSH rc.5 SDK requests](https://github.com/deepseek-ai/deepseek-harness/blob/b830ec950faba0a46dda564be3e2d854afed94f1/packages/sdk/protocol/src/types.ts)
