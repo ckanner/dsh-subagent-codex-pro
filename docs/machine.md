@@ -98,7 +98,7 @@ and exit 2. It is not a started run.
 | outcome.output / structured | Unmodified model text and separately validated JSON; no persistent-thread marker appended |
 | outcome.configuration | requested/effective, source, missing fields, mismatches, matched and full observed sandboxPolicy |
 | outcome.turnConfiguration | Requested effort and whether turn/start accepted it; effectiveEffort stays null because the protocol does not echo it |
-| outcome.execution | run/thread/turn IDs, timestamps, elapsed duration, actual Codex pid/exit/signal, supervisor facts, timeout/cancel/truncation/spawn/failure facts |
+| outcome.execution | run/thread/turn IDs, timestamps, elapsed duration, direct-child/driver pid (the installed Codex launcher may have a native server child), mirrored exit/signal, supervisor facts, timeout/cancel/truncation/spawn/failure facts |
 | outcome.cleanup | Confirmation of the owned process range's disappearance, with a reason when unconfirmed |
 | outcome.usage | complete/partial/unknown; attributable run delta and thread totals, never summed cumulative snapshots |
 | outcome.rateLimits | Account limits, separate from token usage and cost |
@@ -113,13 +113,17 @@ authentication does not establish a dollar price or unlimited quota.
 On POSIX the caller starts a guardian as a new process-group leader with an IPC
 lifeline established during spawn. Codex and its ordinary descendants share
 that group; they do not inherit the lifeline. The live caller owns normal
-cleanup and checks that the group is gone. If the caller dies, including SIGKILL,
-IPC disconnect makes the guardian terminate its own group after a bounded grace.
-There is no later PID-registration window, name-based kill or ancestor-group kill.
+cleanup and checks that the group is gone. A live caller's SIGTERM/SIGINT stops
+the guardian as soon as the app-server exits, so clean runs do not wait out the
+full dispose grace. If the caller dies, including SIGKILL, IPC disconnect makes
+the guardian retain the full grace and terminate its own group. There is no
+later PID-registration window, name-based kill or ancestor-group kill.
 
-The receipt distinguishes the actual Codex process from its supervisor. A
-successful turn may be followed by an intentional TERM/KILL to close a long-lived
-app-server. execution.terminationRequested records that cleanup action; it is
+The receipt distinguishes the direct child/driver process from its supervisor.
+The installed Codex launcher may spawn the native app-server as its own child;
+the reported exit/signal are mirrored launcher facts, not a claim that the
+native server is the same PID. A successful turn may be followed by an
+intentional TERM/KILL to close a long-lived app-server. execution.terminationRequested records that cleanup action; it is
 not a caller cancellation. If the last escalation prevents an actual Codex exit
 message from arriving, its exitCode/signal remain null even if the group is gone.
 No supervisor exit is rewritten as a Codex exit 0. An unconfirmed cleanup cannot
