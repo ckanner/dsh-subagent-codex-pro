@@ -1,7 +1,7 @@
 // Exercise exactly the built npm tarball through public exports and its installed bin.
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,14 +17,16 @@ function run(file, args, options = {}) {
   return result.stdout
 }
 try {
-  const raw = execFileSync(npm, ['pack', '--ignore-scripts', '--json', '--pack-destination', temp],
+  // npm 12 changes the machine-readable `pack --json` shape. The tarball on
+  // disk is the contract this smoke needs, and its name is stable across npm
+  // versions, so discover it directly instead of parsing npm's JSON envelope.
+  execFileSync(npm, ['pack', '--ignore-scripts', '--pack-destination', temp],
     { cwd: root, env, encoding: 'utf8', timeout: 30_000 })
-  const parsed = JSON.parse(raw)
-  const packed = Array.isArray(parsed) ? parsed[0] : parsed
-  assert.equal(typeof packed.filename, 'string')
+  const tarballs = readdirSync(temp).filter((name) => name.endsWith('.tgz'))
+  assert.equal(tarballs.length, 1, `expected one packed tarball, found ${tarballs.join(', ')}`)
   const install = join(temp, 'installed')
   mkdirSync(install)
-  run(npm, ['install', '--prefix', install, '--ignore-scripts', '--no-audit', '--no-fund', join(temp, packed.filename)])
+  run(npm, ['install', '--prefix', install, '--ignore-scripts', '--no-audit', '--no-fund', join(temp, tarballs[0])])
   const command = join(temp, 'fake-codex.mjs')
   copyFileSync(join(root, 'tests/fixtures/machine-server.mjs'), command)
   chmodSync(command, 0o755)
