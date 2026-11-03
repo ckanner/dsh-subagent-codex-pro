@@ -124,6 +124,23 @@ export function parseMachineRequest(value: unknown): MachineRequest {
   return input as unknown as MachineRequest
 }
 
+/** Bound a diagnostic without retaining arbitrary server output. */
+function boundedDiagnostic(value: string): string {
+  return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '?').slice(0, 4096)
+}
+
+/** Include the cause of a startup failure, which carries the actionable reason. */
+function failureDiagnostic(error: CodexRunFailure | undefined): string {
+  if (error === undefined) return 'codex-pro: run could not be initialized'
+  const cause = (error as Error & { cause?: unknown }).cause
+  const causeMessage = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : undefined
+  const base = error.message
+  const detail = causeMessage === undefined || base.includes(causeMessage)
+    ? base
+    : base + ': ' + causeMessage
+  return boundedDiagnostic(detail)
+}
+
 /** A machine run never invents an exit code, usage, effective effort, or dollar cost. */
 export async function runMachine(value: MachineRequest, options: MachineOptions = {}): Promise<MachineReceipt> {
   const request = parseMachineRequest(value)
@@ -162,7 +179,7 @@ export async function runMachine(value: MachineRequest, options: MachineOptions 
       runId: failure?.execution?.runId ?? randomUUID(), ok: false, requested, outcome: null,
       failure: {
         stage: failure?.facts.stage ?? 'initialize', category: failure?.facts.category ?? 'runtime',
-        diagnostic: failure?.message ?? 'codex-pro: run could not be initialized',
+        diagnostic: failureDiagnostic(failure),
         execution: failure?.execution ?? null,
         configuration: failure?.configuration ?? null,
         usage: failure?.usage ?? null,

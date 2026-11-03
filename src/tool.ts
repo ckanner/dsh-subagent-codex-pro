@@ -49,6 +49,8 @@ export interface CodexToolOptions {
   readonly model?: string
   /** Default reasoning effort when a call does not name one. */
   readonly reasoningEffort?: string
+  /** Configured permission policy; limits the per-call enum to safe choices. */
+  readonly permissionMode?: CodexPermissionMode
   /**
    * Whether the plugin permits Agent-chosen Codex models.
    *
@@ -86,6 +88,25 @@ export interface CodexToolOptions {
 }
 
 /**
+ * Permission modes a per-call override may select without changing the
+ * configured policy upward.
+ *
+ * The tool description and schema should not advertise a choice that the
+ * runtime's narrowing guard will reject. When no policy is supplied (direct
+ * tests or older callers), all modes remain visible for compatibility.
+ */
+export function allowedPermissionModes(
+  configured: CodexPermissionMode | undefined,
+): readonly CodexPermissionMode[] {
+  const modes: CodexPermissionMode[] = [
+    'read-only', 'workspace-write', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox',
+  ]
+  if (configured === undefined) return modes
+  return modes.filter((mode) => mode === configured || mode === 'read-only'
+    || (configured === 'dangerously-bypass-approvals-and-sandbox' && mode === 'workspace-write'))
+}
+
+/**
  * Build the delegation tool definition.
  *
  * @param options - the delegating Agent's fixed choices, its runner, and its
@@ -93,6 +114,7 @@ export interface CodexToolOptions {
  * @returns a definition ready for `agent.ctx.tools.register`.
  */
 export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
+  const permissionModes = allowedPermissionModes(options.permissionMode)
   const effortHint = options.reasoningEffort === undefined
     ? ''
     : ` Leave it unset to use the configured ${options.reasoningEffort}.`
@@ -167,8 +189,9 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         },
         permission_mode: {
           type: 'string',
-          enum: ['read-only', 'workspace-write', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox'],
-          description: 'Permission mode for this delegation. `read-only` is the safe Review mode:'
+          enum: permissionModes,
+          description: 'Permission mode for this delegation. Only modes that cannot expand the configured'
+            + ' policy are listed. `read-only` is the safe Review mode:'
             + ' approvalPolicy=never plus a read-only sandbox. `workspace-write` combines never with'
             + ' the workspace-write sandbox. Per-call overrides may only narrow the configured policy.'
             + ' `never` alone is not read-only. Omit to use'

@@ -79,6 +79,16 @@ test('startup configuration failures remain machine-readable and never send the 
   }
 })
 
+test('startup failure receipts retain the bounded cause', async (t) => {
+  const { dir, command } = fixture(t)
+  const result = await runMachine(request(dir, command), {
+    env: { FAKE_MACHINE_MODE: 'wrong-ephemeral' },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.failure?.stage, 'thread-start')
+  assert.match(result.failure?.diagnostic ?? '', /ephemeral|persistent/i)
+})
+
 test('bad usage following a valid snapshot is not represented as complete', async (t) => {
   const { dir, command } = fixture(t)
   const result = await runMachine(request(dir, command), { env: { FAKE_MACHINE_MODE: 'bad-usage' } })
@@ -121,6 +131,42 @@ test('DSH provider preserves a clean structured answer and bounded metadata diag
   assert.equal((result.diagnostic ?? '').includes(dir), false)
   assert.ok(Buffer.byteLength(result.diagnostic ?? '') <= 4096)
   await run.dispose()
+})
+
+test('the provider keeps a bounded approval diagnostic from an unattended decision', async (t) => {
+  const { dir, command } = fixture(t)
+  const provider = new CodexExecProvider({
+    providerName: 'codex-pro-approval-test', command, permissionMode: 'read-only', model: 'test-model',
+    env: { FAKE_MACHINE_MODE: 'declined' },
+  })
+  const run = await provider.start({
+    prompt: [{ type: 'text', text: 'approval diagnostic probe' }],
+    cwd: dir,
+    parent: { session: { header: { cwd: dir } } } as never,
+    signal: new AbortController().signal,
+  })
+  const result = await run.result
+  assert.equal(result.stopReason, 'completed')
+  assert.match(result.diagnostic ?? '', /Codex unattended decision/)
+  assert.match(result.diagnostic ?? '', /command approval/)
+  assert.equal((result.diagnostic ?? '').includes('approval diagnostic probe'), false)
+  await run.dispose()
+})
+
+test('CLI treats a consumer-closed stdout as a quiet non-zero exit', { timeout: 20_000 }, async (t) => {
+  const { dir, command } = fixture(t)
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/machine-cli.ts', import.meta.url)), '--json'], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, FAKE_MACHINE_MODE: 'large-final' },
+  })
+  t.after(() => { child.kill('SIGKILL') })
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', (code) => resolve(code))
+  })
+  child.stdin.end(JSON.stringify({ ...request(dir, command), timeoutMs: 10_000 }))
+  setTimeout(() => { child.stdout.destroy() }, 50)
+  assert.equal(await exited, 1)
 })
 
 test('CLI invalid input is a single bounded error envelope and does not echo task data', () => {

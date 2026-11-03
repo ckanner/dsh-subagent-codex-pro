@@ -302,7 +302,7 @@ Codex 通过 `thread/tokenUsage/updated` 报告线程累计的 `total` 和最近
 统计器把通知折叠成一次委派的报告：
 
 - `run` 是相对观测 baseline 的增量，绝不是把通知快照相加。
-- resume 在 turn 开始前的重放会作为 baseline，不计入本次消耗。
+- resume 的重放会作为 baseline，不计入本次消耗；即使 Codex 在 turn/start 请求之后才发送该快照也一样。当前 turn 已有 live 快照后，其他 turn 的快照仍保持不可归属。
 - resume 没有重放就收到第一条 live 快照时，报告是 `partial`，不会凭空写 0。
 - 重复快照不累计；异常通知、归属不明或计数回退标记 `partial`，不产生负数。
 - 其他 thread/turn 的 usage 不加进来。
@@ -319,11 +319,11 @@ Codex 通过 `thread/tokenUsage/updated` 报告线程累计的 `total` 和最近
 
 ## 验证层次
 
-0.8.0新增guardian、公开machine入口与实际npm tarball安装检查，CI覆盖Ubuntu/macOS与Node22/24。以下真实模型记录属于**历史0.7.0基线**；本次没有重新执行0.8.0真实模型或用户桌面验证。
+0.8.0新增guardian、公开machine入口与实际npm tarball安装检查，CI覆盖Ubuntu/macOS与Node22/24。以下真实模型记录来自已安装的 Codex **0.165.0**，属于 0.8.0 发布验证；覆盖的是用例使用的显式权限模式，不代表所有插件默认值。
 
 1. **离线/封闭**：默认 `npm test`。用真实协议类和真实子进程驱动脚本化 fake app-server，覆盖启动卡死、turn 卡死、调用方取消、提前退出、resume、usage 重放、重复、只读权限、结构化校验、进程组后代和幂等 teardown。不调用模型，不碰 Codex 账号。
-2. **真实 Codex app-server**：已用安装的 Codex **0.165.0** 跑 live app-server 用例（`CODEX_SUBAGENT_LIVE=1`），**4/4 通过**：覆盖 model + effort、默认配置、persistent thread 带显式 model/cwd/read-only 覆盖续接（含 usage 重放和 effective 配置校验），以及 `output_schema` 解码。单独的 `codex exec` live 用例也通过（该文件 20/20，其中一次真实 CLI 调用）。官方 **0.166.0** 的 `ThreadResumeParams`、`ThreadResumeResponse`、`ThreadTokenUsage`、`token_usage_replay.rs` 已审阅，但没有执行 0.166 runtime。
-3. **真实 DSH desktop 端到端**：仍未运行。实现保持现有 DSH provider/tool/job 契约；0.8.0真实模型与桌面smoke仍需单列。本轮未修改用户全局Codex登录或配置。
+2. **真实 Codex app-server**：已用安装的 Codex **0.165.0** 跑 live app-server 用例（`CODEX_SUBAGENT_LIVE=1`），**4/4 通过**：覆盖 model + effort、显式权限模式、persistent thread 带显式 model/cwd/read-only 覆盖续接（含 usage 重放和 effective 配置校验），以及 `output_schema` 解码；另做了 `workspace-write` 默认权限和 `approve-for-me` 的真实检查。单独的 `codex exec` live 用例也通过（该文件 20/20，其中一次真实 CLI 调用）。官方 **0.166.0** 的 `ThreadResumeParams`、`ThreadResumeResponse`、`ThreadTokenUsage`、`token_usage_replay.rs` 已审阅，但没有执行 0.166 runtime。
+3. **真实 DSH desktop 端到端**：仍未运行。实现保持现有 DSH provider/tool/job 契约；桌面 smoke 是唯一未执行的验证层。本轮未修改用户全局 Codex 登录或配置。
 
 ## 能力
 

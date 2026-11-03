@@ -181,7 +181,7 @@ not accept.
 
 ## Verification layers
 
-The 0.8.0 verification matrix includes real fake-process tests and installed-tarball smoke tests on Ubuntu/macOS and Node 22/24. The live observations below are a **historical 0.7.0 baseline**, not a new live run of 0.8.0:
+The 0.8.0 verification matrix includes real fake-process tests and installed-tarball smoke tests on Ubuntu/macOS and Node 22/24. The live observations below are from the installed Codex **0.165.0**; they cover the explicit permission modes used by the cases, not every plugin default:
 
 1. **Offline / hermetic** — the default `npm test` suite. It drives the real
    protocol classes and a real child process through a scripted fake app-server:
@@ -191,9 +191,12 @@ The 0.8.0 verification matrix includes real fake-process tests and installed-tar
    is touched.
 2. **Real Codex app-server** — the live app-server cases were run against the
    installed Codex **0.165.0** with `CODEX_SUBAGENT_LIVE=1`:
-   `4/4` passed. They covered model + effort, the defaults, a persistent thread
-   resumed with explicit model/cwd/read-only overrides (including usage replay
-   and effective-config verification), and `output_schema` decoding. The
+   `4/4` passed. They covered model + effort, explicit permission modes, a persistent
+   thread resumed with explicit model/cwd/read-only overrides (including usage
+   replay and effective-config verification), and `output_schema` decoding. A
+   separate real check also exercised the new `workspace-write` default and
+   `approve-for-me`. These live cases are part of the 0.8.0 release validation;
+   the DSH desktop smoke remains separate. The
    separate `codex exec` live case also passed (`20/20` in that file, one real
    CLI call). The official **0.166.0** TypeScript schemas were reviewed for
    `ThreadResumeParams`, `ThreadResumeResponse`, `ThreadTokenUsage`, and
@@ -201,8 +204,8 @@ The 0.8.0 verification matrix includes real fake-process tests and installed-tar
    the same `codex app-server --stdio` path.
 3. **Real DSH desktop end-to-end** — still not run. The implementation keeps
    the existing DSH provider/tool/job contracts; a desktop smoke test remains
-   unexecuted layer. Real model and desktop tests have not been rerun for 0.8.0.
-   Neither CI nor the package smoke changes a user login or calls a model.
+   the one unexecuted layer. Neither CI nor the package smoke changes a user
+   login or calls a model.
 
 ## Making the answer machine-readable
 
@@ -478,7 +481,9 @@ connection. Treating that replay as current spending is wrong.
 The tracker folds notifications into one run report:
 
 - `run` is the delta from the observed baseline, never a sum of notification snapshots.
-- A pre-turn replay after resume becomes the baseline and contributes no run usage.
+- A replay after resume becomes the baseline and contributes no run usage, even
+  when Codex sends it after the turn/start request. A foreign-turn snapshot after
+  a live current-turn snapshot remains unattributed.
 - A resume with no replay before its first live snapshot is `partial`; the report never invents a zero.
 - Duplicate and out-of-order snapshots are ignored; malformed events or a counter that moves backwards mark the report `partial`
   rather than producing negative usage.
@@ -486,7 +491,9 @@ The tracker folds notifications into one run report:
 - No observation is `unknown` with no `run`, never a fake `0`; an observation that arrived before a failure,
   timeout, or cancellation is retained in the failed outcome.
 - `cachedInputTokens` is a subset of `inputTokens` and `reasoningOutputTokens` is a subset of `outputTokens`;
-  the fields are reported as Codex states them and never added together.
+  the fields are reported as Codex states them and never added together. The
+  protocol-defaulted `cacheWriteInputTokens` may be omitted and is then recorded
+  as zero.
 
 `account/rateLimits/updated` is stored separately as `rateLimits`; account limits are not token usage and are
 not merged into it. Both are exposed on `CodexRunOutcome` / `delegateOnce` results and written to the diagnostic

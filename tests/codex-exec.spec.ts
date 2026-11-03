@@ -156,6 +156,24 @@ test('the tool forwards the call\'s model and effort to the runner', async () =>
   )
 })
 
+test('the tool advertises only permission modes the configured policy permits', async () => {
+  const { createCodexTool, allowedPermissionModes } = await import('../src/tool.ts')
+  const make = (permissionMode: 'read-only' | 'workspace-write' | 'never' | 'approve-for-me' | 'dangerously-bypass-approvals-and-sandbox') =>
+    createCodexTool({
+      cwd: '/w',
+      modelSelectionEnabled: true,
+      permissionMode,
+      run: async () => ({ text: 'DONE', threadId: undefined }),
+    })
+  const enumOf = (tool: { parameters: Record<string, unknown> }): unknown =>
+    (tool.parameters as { properties: { permission_mode: { enum: unknown } } }).properties.permission_mode.enum
+  assert.deepEqual(enumOf(make('workspace-write')), ['read-only', 'workspace-write'])
+  assert.deepEqual(enumOf(make('dangerously-bypass-approvals-and-sandbox')),
+    ['read-only', 'workspace-write', 'dangerously-bypass-approvals-and-sandbox'])
+  assert.deepEqual(allowedPermissionModes('approve-for-me'), ['read-only', 'approve-for-me'])
+  assert.deepEqual(enumOf(make('read-only')), ['read-only'])
+})
+
 test('the tool forwards a per-call permission mode and rejects an unknown one', async () => {
   const { createCodexTool } = await import('../src/tool.ts')
   const seen: (string | undefined)[] = []

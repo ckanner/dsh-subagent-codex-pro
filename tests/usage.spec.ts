@@ -137,10 +137,19 @@ test('replay alone is unknown, and the historical total is retained', () => {
   assert.equal(report.threadTotal?.totalTokens, 1000)
 })
 
+test('the protocol-defaulted cache-write counter may be omitted', () => {
+  const { cacheWriteInputTokens: _defaulted, ...withoutCacheWrites } = usage(200).total
+  const tracker = new TokenUsageTracker()
+  tracker.resetForNewThread('thread-1')
+  tracker.beginTurn('turn-1')
+  tracker.observe({ threadId: 'thread-1', turnId: 'turn-1', tokenUsage: { total: withoutCacheWrites } })
+  assert.equal(tracker.report().status, 'complete')
+  assert.equal(tracker.report().run?.totalTokens, 200)
+  assert.equal(tracker.report().run?.cacheWriteInputTokens, 0)
+})
+
 test('a malformed observation after valid usage retains only a partial known amount', () => {
-  const { cacheWriteInputTokens: missing, ...withoutCacheWrites } = usage(200).total
-  assert.equal(missing, 0)
-  for (const tokenUsage of [null, {}, usage(-1), { total: { totalTokens: 200 } }, { total: withoutCacheWrites }]) {
+  for (const tokenUsage of [null, {}, usage(-1), { total: { totalTokens: 200 } }]) {
     const tracker = new TokenUsageTracker()
     tracker.resetForNewThread('thread-1')
     tracker.beginTurn('turn-1')
