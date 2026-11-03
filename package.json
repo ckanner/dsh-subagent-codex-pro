@@ -38,7 +38,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"tests/*.spec.ts\"",
-    "test:package": "node scripts/verify-package.mjs",
+    "test:package": "npm run build && node scripts/verify-package.mjs",
     "prepublishOnly": "npm run build",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=\"src/**/*.ts\" \"tests/*.spec.ts\""
   },
