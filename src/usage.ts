@@ -211,12 +211,18 @@ export class TokenUsageTracker {
     this.#baseline = ZERO
   }
 
-  /** Close the historical replay window before sending turn/start. */
+  /**
+   * Mark the turn/start request boundary.
+   *
+   * Notifications are buffered until the response proves the authoritative turn
+   * id; that keeps a resumed thread's replay and a current-turn live snapshot
+   * distinguishable even when the replay arrives after this request.
+   */
   startTurnRequest(): void {
     this.#awaitingTurnId = true
   }
 
-  /** Associate early live notifications only after the response proves the turn id. */
+  /** Associate early notifications after the response proves the turn id. */
   beginTurn(turnId: string): void {
     this.#turnId = turnId
     this.#awaitingTurnId = false
@@ -281,9 +287,15 @@ export class TokenUsageTracker {
     const modelContextWindow = this.#contextWindowOf(notification.tokenUsage)
     if (modelContextWindow !== undefined) this.#modelContextWindow = modelContextWindow
 
-    // A resumed thread's history arrives before its new turn starts. Adopt that
-    // snapshot as the baseline; it is not local consumption.
-    if (this.#mode === 'resumed' && this.#turnId === undefined) {
+    // A resumed thread's replay can arrive before or after the turn/start
+    // request. Until this turn has produced a live usage snapshot, a snapshot
+    // for another turn is the thread's history, not this delegation's
+    // consumption; adopt the latest such snapshot as the baseline. A thread
+    // has one active writer, so this cannot be concurrent live usage. Once a
+    // live snapshot for our turn exists, a later foreign-turn snapshot must
+    // remain unattributed and the report partial.
+    if (this.#mode === 'resumed' && !this.#liveSeen
+      && (this.#turnId === undefined || turnId !== this.#turnId)) {
       if (this.#replaySeen && !notOlder(total, this.#highWater)) {
         this.#anomaly = true
         this.#reason = 'historical usage moved backwards before the turn started'

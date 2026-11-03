@@ -8,7 +8,7 @@
 - Reject missing or conflicting effective configuration before sending a task. Preserve full sandbox policy and request-only effort evidence.
 - Default to workspace-write + never; full access remains explicit and tool overrides cannot expand configured permissions.
 - Align DSH rc.5 capabilities, reject unsupported provider/maxTokens overrides, and reject dispose when cleanup is unconfirmed.
-- Correct malformed, early, foreign-turn and resumed token-usage accounting; unknown counters and costs are not zero.
+- Correct malformed, early, foreign-turn and resumed token-usage accounting; unknown counters and costs are not zero. A resumed thread's historical replay is adopted even when it arrives after turn/start; a different-turn snapshot after live current-turn usage remains unattributed.
 - Add Ubuntu/macOS Node22/24 CI, real packed-package/public-entry tests, migration notes and Flywheel/PR workflow documentation.
 - Live Codex/account/DSH desktop validation is not claimed for this version.
 

@@ -223,17 +223,41 @@ test('early resumed live usage without history remains partial', () => {
   assert.equal(tracker.report().run?.totalTokens, 50)
 })
 
-test('late usage for another turn cannot become a resumed run baseline', () => {
+test('a replay arriving after turn/start is still the resumed baseline', () => {
   const tracker = new TokenUsageTracker()
   tracker.resetForResume('thread-1')
   tracker.startTurnRequest()
-  tracker.observe(note('different-turn', 1000))
-  tracker.observe(note('turn-2', 1100))
+  tracker.observe(note('old-turn', 1000))
   tracker.beginTurn('turn-2')
-  tracker.observe(note('turn-2', 1200))
+  tracker.observe(note('turn-2', 1300))
+  assert.equal(tracker.report().status, 'complete')
+  assert.equal(tracker.report().replayedBaseline, true)
+  assert.equal(tracker.report().run?.totalTokens, 300)
+  assert.equal(tracker.report().threadTotal?.totalTokens, 1300)
+})
+
+test('a historical snapshot after a live current-turn snapshot stays unattributed', () => {
+  const tracker = new TokenUsageTracker()
+  tracker.resetForResume('thread-1')
+  tracker.startTurnRequest()
+  tracker.beginTurn('turn-2')
+  tracker.observe(note('turn-2', 1100))
+  tracker.observe(note('different-turn', 9000))
   assert.equal(tracker.report().status, 'partial')
   assert.equal(tracker.report().replayedBaseline, false)
   assert.equal(tracker.report().run, undefined)
+})
+
+test('a historical snapshot arriving after the turn id is confirmed is the resumed baseline', () => {
+  const tracker = new TokenUsageTracker()
+  tracker.resetForResume('thread-1')
+  tracker.startTurnRequest()
+  tracker.beginTurn('turn-2')
+  tracker.observe(note('old-turn', 1000))
+  tracker.observe(note('turn-2', 1300))
+  assert.equal(tracker.report().status, 'complete')
+  assert.equal(tracker.report().replayedBaseline, true)
+  assert.equal(tracker.report().run?.totalTokens, 300)
 })
 
 test('the latest valid replay before submission is the resumed baseline', () => {

@@ -368,17 +368,17 @@ test('a resumed thread treats its replay as baseline and reports only the increm
   assert.equal(outcome.usage.threadTotal?.totalTokens, 1300)
 })
 
-test('another turn notification after turn/start cannot invent a complete resume baseline', async () => {
+test('a replay arriving after turn/start is the resumed run baseline', async () => {
   const run = await startCodexRun([{ type: 'text', text: 'probe' }], {
     cwd: '/tmp', command: fakeServer('usage-late-replay'), permissionMode: 'read-only',
     threadMode: 'persistent', resumeThreadId: 'thread-1', runTimeoutMs: 5_000, disposeGraceMs: 100,
   }, new AbortController().signal)
   const outcome = await run.result
   assert.equal(outcome.stopReason, 'completed', lifecycleDiagnostic(outcome))
-  assert.equal(outcome.usage.status, 'partial')
-  assert.equal(outcome.usage.replayedBaseline, false)
-  assert.notEqual(outcome.usage.run?.totalTokens, 300)
-  assert.ok(outcome.usage.reason)
+  assert.equal(outcome.usage.status, 'complete')
+  assert.equal(outcome.usage.replayedBaseline, true)
+  assert.equal(outcome.usage.run?.totalTokens, 300)
+  assert.equal(outcome.usage.threadTotal?.totalTokens, 1300)
 })
 
 test('teardown is idempotent and reports a confirmed process range', async () => {
