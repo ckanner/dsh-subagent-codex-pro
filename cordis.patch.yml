@@ -19,6 +19,7 @@
       name: 'dsh-subagent-codex-pro'
       config:
         providerName: codex-pro
+        permissionMode: workspace-write
         presets: [daily, heavy]
         # `model` / `reasoningEffort` are deliberately unset. Whatever the user's
         # prompt names is what the delegation uses; when it names nothing, the

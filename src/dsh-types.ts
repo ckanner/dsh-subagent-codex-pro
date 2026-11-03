@@ -72,10 +72,9 @@ export interface SubagentProviderLike {
   readonly name: string
   readonly capabilities: {
     readonly agentOptions: boolean
+    readonly agentPreset: boolean
     readonly outputSchema: boolean
     readonly depthLimit: boolean
-    readonly toolFilter: boolean
-    readonly persona: boolean
   }
   readonly inheritsParentContext: boolean
   start(request: SubagentStartRequestLike): Promise<SubagentRunLike>

@@ -12,7 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { startCodexRun, type CodexRunSpec } from '../src/run.ts'
+import { startCodexRun, CodexRunFailure, type CodexRunSpec } from '../src/run.ts'
 
 /** An executable name no platform ships. */
 const MISSING = 'dsh-codex-pro-missing-executable-4f9a2c'
@@ -31,7 +31,15 @@ test('a missing Codex executable fails the run without an unhandled rejection', 
     }
     await assert.rejects(
       startCodexRun([{ type: 'text', text: 'probe' }], spec, new AbortController().signal),
-      (error: unknown) => error instanceof Error,
+      (error: unknown) => {
+        assert.ok(error instanceof CodexRunFailure)
+        assert.match(error.execution?.spawnError ?? '', /ENOENT/)
+        assert.equal(error.execution?.pid, null)
+        assert.equal(error.execution?.exitCode, null)
+        assert.equal(error.execution?.signal, null)
+        assert.equal(error.cleanup?.confirmed, true, JSON.stringify({ cleanup: error.cleanup, execution: error.execution }))
+        return true
+      },
     )
     // The spawn error is delivered on a later tick. Give a leaked rejection the
     // chance to surface before asserting the cleanup path was quiet.

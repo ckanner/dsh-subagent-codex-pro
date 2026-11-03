@@ -65,6 +65,8 @@ jobs:
         # `npm pack` runs `prepare`, and this package builds from `prepublishOnly`
         # instead, so the tarball the Release carries has to be built here.
         run: npm run build
+      - name: Verify the packed public machine API
+        run: npm run test:package
 
       - name: Resolve the version, and refuse a tag that does not match it
         # A publish is not undoable, and an npm version can never be reused, so a

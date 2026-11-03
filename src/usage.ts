@@ -94,23 +94,22 @@ function count(value: unknown): value is number {
 }
 
 /**
- * Normalise a reported breakdown, applying Codex's documented default for the
- * one optional counter. `cacheWriteInputTokens` is the only field the protocol
- * does not require; the other five must be present and non-negative.
+ * Validate the complete breakdown emitted by the supported 0.165/0.166
+ * protocol. Every counter is required in its generated response type. Missing
+ * observations are not evidence of zero usage, including for cache writes.
  */
 function normalizeBreakdown(value: unknown): TokenUsageBreakdown | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
-  const cacheWrite = record.cacheWriteInputTokens === undefined ? 0 : record.cacheWriteInputTokens
   if (!count(record.totalTokens) || !count(record.inputTokens) || !count(record.cachedInputTokens)
-    || !count(record.outputTokens) || !count(record.reasoningOutputTokens) || !count(cacheWrite)) {
+    || !count(record.outputTokens) || !count(record.reasoningOutputTokens) || !count(record.cacheWriteInputTokens)) {
     return undefined
   }
   return {
     totalTokens: record.totalTokens,
     inputTokens: record.inputTokens,
     cachedInputTokens: record.cachedInputTokens,
-    cacheWriteInputTokens: cacheWrite,
+    cacheWriteInputTokens: record.cacheWriteInputTokens,
     outputTokens: record.outputTokens,
     reasoningOutputTokens: record.reasoningOutputTokens,
   }
@@ -164,11 +163,16 @@ export class TokenUsageTracker {
   #liveSeen = false
   #advanced = false
   #anomaly = false
+  #invalid = false
+  #associationLost = false
   #reason: string | undefined
+  #threadId: string | undefined
   #turnId: string | undefined
+  #awaitingTurnId = false
+  #pending: TokenUsageNotificationLike[] = []
 
   /** Start accounting for a thread that has no history. */
-  resetForNewThread(): void {
+  resetForNewThread(threadId: string): void {
     this.#mode = 'new'
     this.#state = 'collecting'
     this.#baselineKnown = true
@@ -182,8 +186,13 @@ export class TokenUsageTracker {
     this.#liveSeen = false
     this.#advanced = false
     this.#anomaly = false
+    this.#invalid = false
+    this.#associationLost = false
     this.#reason = undefined
+    this.#threadId = threadId
     this.#turnId = undefined
+    this.#awaitingTurnId = false
+    this.#pending = []
   }
 
   /**
@@ -195,16 +204,29 @@ export class TokenUsageTracker {
    * snapshot is still used as a baseline but the report is `partial`, because
    * usage before that snapshot is unknowable from the protocol.
    */
-  resetForResume(): void {
-    this.resetForNewThread()
+  resetForResume(threadId: string): void {
+    this.resetForNewThread(threadId)
     this.#mode = 'resumed'
     this.#baselineKnown = false
     this.#baseline = ZERO
   }
 
-  /** Record the authoritative turn id; notifications before this are history. */
+  /**
+   * Mark the turn/start request boundary.
+   *
+   * Notifications are buffered until the response proves the authoritative turn
+   * id; that keeps a resumed thread's replay and a current-turn live snapshot
+   * distinguishable even when the replay arrives after this request.
+   */
+  startTurnRequest(): void {
+    this.#awaitingTurnId = true
+  }
+
+  /** Associate early notifications after the response proves the turn id. */
   beginTurn(turnId: string): void {
     this.#turnId = turnId
+    this.#awaitingTurnId = false
+    for (const notification of this.#pending.splice(0)) this.observe(notification)
   }
 
   /** The current turn id, when the wire has adopted it. */
@@ -225,6 +247,7 @@ export class TokenUsageTracker {
   /** Begin a report's closing fold; further observations are ignored. */
   close(): void {
     this.#state = 'closed'
+    this.#pending = []
   }
 
   /**
@@ -235,11 +258,28 @@ export class TokenUsageTracker {
    */
   observe(notification: TokenUsageNotificationLike): boolean {
     if (this.#state === 'closed') return false
+    if (typeof notification.threadId !== 'string' || notification.threadId === '') {
+      this.observeInvalid()
+      return false
+    }
+    if (notification.threadId !== this.#threadId) return false
+    // A server may emit turn/started, usage, and completion before answering
+    // turn/start. Buffer this bounded window rather than mistaking live usage
+    // for a resumed thread's history or attributing an unrelated turn to ours.
+    if (this.#awaitingTurnId) {
+      if (this.#pending.length < 128) this.#pending.push(notification)
+      else {
+        this.#invalid = true
+        this.#reason = 'too many usage notifications arrived before the turn id was confirmed'
+      }
+      return false
+    }
     const turnId = typeof notification.turnId === 'string' && notification.turnId !== ''
       ? notification.turnId
       : undefined
     const total = this.#totalOf(notification.tokenUsage)
     if (turnId === undefined || total === undefined) {
+      this.#invalid = true
       this.#reason = 'Codex reported a malformed token-usage notification'
       return false
     }
@@ -247,16 +287,45 @@ export class TokenUsageTracker {
     const modelContextWindow = this.#contextWindowOf(notification.tokenUsage)
     if (modelContextWindow !== undefined) this.#modelContextWindow = modelContextWindow
 
-    // A resumed thread's history arrives before its new turn starts. Adopt that
-    // snapshot as the baseline; it is not local consumption.
-    if (this.#mode === 'resumed' && !this.#replaySeen
+    // A resumed thread's replay can arrive before or after the turn/start
+    // request. Until this turn has produced a live usage snapshot, a snapshot
+    // for another turn is the thread's history, not this delegation's
+    // consumption; adopt the latest such snapshot as the baseline. A thread
+    // has one active writer, so this cannot be concurrent live usage. Once a
+    // live snapshot for our turn exists, a later foreign-turn snapshot must
+    // remain unattributed and the report partial.
+    if (this.#mode === 'resumed' && !this.#liveSeen
       && (this.#turnId === undefined || turnId !== this.#turnId)) {
+      if (this.#replaySeen && !notOlder(total, this.#highWater)) {
+        this.#anomaly = true
+        this.#reason = 'historical usage moved backwards before the turn started'
+      }
       this.#baseline = total
       this.#baselineKnown = true
       this.#replaySeen = true
       this.#highWater = total
       this.#latest = total
       return true
+    }
+
+    // Before the request, a new thread cannot have produced this delegation's
+    // consumption. Keep the observed baseline, but do not call it our usage.
+    if (this.#turnId === undefined) {
+      this.#baseline = total
+      this.#highWater = total
+      this.#latest = total
+      this.#invalid = true
+      this.#reason = 'a new thread reported historical usage before this turn was requested'
+      return false
+    }
+
+    // Once our request has started, another turn is not a reliable historical
+    // baseline. Its consumption can also be included in later thread totals,
+    // so ignoring the notification alone would still overcount our next delta.
+    if (turnId !== this.#turnId) {
+      this.#associationLost = true
+      this.#reason = 'usage for another turn prevents reliable run attribution'
+      return false
     }
 
     this.#liveSeen = true
@@ -270,13 +339,6 @@ export class TokenUsageTracker {
       this.#reason = 'the resumed thread did not replay a baseline before its first live usage'
       this.#highWater = total
       this.#latest = total
-      return false
-    }
-
-    // A snapshot for another turn after ours began cannot be attributed to this
-    // delegation. The notification is still counted as observed, but not added.
-    if (this.#turnId !== undefined && turnId !== this.#turnId) {
-      this.#reason = 'usage for another turn was ignored'
       return false
     }
 
@@ -304,6 +366,8 @@ export class TokenUsageTracker {
 
   /** Record a malformed notification so the report can say so. */
   observeInvalid(): void {
+    if (this.#state === 'closed') return
+    this.#invalid = true
     this.#reason = 'Codex reported an invalid token-usage notification'
   }
 
@@ -321,15 +385,15 @@ export class TokenUsageTracker {
         observations: this.#observations,
         replayedBaseline: this.#replaySeen,
         ...(latest === undefined ? {} : { threadTotal: latest }),
-        reason: latest === undefined
-          ? (this.#reason ?? 'no token-usage notification was observed')
-          : 'only replayed historical usage was observed',
+        reason: this.#reason ?? (latest === undefined
+          ? 'no token-usage notification was observed'
+          : 'only replayed historical usage was observed'),
       }
     }
-    const delta = this.#baselineKnown && !this.#anomaly && !(this.#baselineFromLive && !this.#advanced)
+    const delta = this.#baselineKnown && !this.#anomaly && !this.#associationLost && !(this.#baselineFromLive && !this.#advanced)
       ? subtract(latest, this.#baseline)
       : undefined
-    const partial = delta === undefined || this.#anomaly || this.#baselineFromLive || !this.#baselineKnown
+    const partial = delta === undefined || this.#invalid || this.#anomaly || this.#associationLost || this.#baselineFromLive || !this.#baselineKnown
     return {
       status: partial ? 'partial' : 'complete',
       ...(delta === undefined ? {} : { run: delta }),

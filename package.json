@@ -1,6 +1,6 @@
 {
   "name": "dsh-subagent-codex-pro",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A Codex delegation tool for DeepSeek Harness that can carry a model and a reasoning effort per call.",
   "type": "module",
   "main": "lib/index.js",
@@ -10,7 +10,14 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./machine": {
+      "types": "./lib/types/machine.d.ts",
+      "default": "./lib/machine.js"
+    },
     "./package.json": "./package.json"
+  },
+  "bin": {
+    "codex-pro-machine": "lib/machine-cli.js"
   },
   "files": [
     "lib",
@@ -18,6 +25,8 @@
     "README.md",
     "CHANGELOG.md",
     "docs/README.zh.md",
+    "docs/machine.md",
+    "docs/orchestration.zh.md",
     "LICENSE"
   ],
   "dsh": {
@@ -29,6 +38,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"tests/*.spec.ts\"",
+    "test:package": "node scripts/verify-package.mjs",
     "prepublishOnly": "npm run build",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=\"src/**/*.ts\" \"tests/*.spec.ts\""
   },
@@ -37,6 +47,9 @@
     "typescript": "^5.9.0"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "homepage": "https://github.com/ckanner/dsh-subagent-codex-pro#readme",
   "repository": {
     "type": "git",

@@ -17,6 +17,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 
 import { LineTransport, type JsonRpcMessage } from './jsonrpc.ts'
 import { verifyStructuredOutput } from './structured.ts'
@@ -28,6 +29,7 @@ import {
   type CodexRateLimitsReport,
   type CodexResumeOverrides,
   type CodexStopReason,
+  type TurnConfiguration,
 } from './wire.ts'
 import type { CodexImage, CodexThreadMode } from './wire.ts'
 import type { CodexUsageReport } from './usage.ts'
@@ -37,6 +39,12 @@ const DEFAULT_DISPOSE_GRACE_MS = 3_000
 
 /** Hard upper bound on observing a process group disappear after SIGKILL. */
 const GROUP_REAP_TIMEOUT_MS = 2_000
+/** A dead leader cannot lend an infinite stdout lease to a descendant. */
+const EXIT_DRAIN_TIMEOUT_MS = 1_000
+
+/** Bound protocol and diagnostic output retained/forwarded by this adapter. */
+const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024
+const MAX_TIMER_MS = 2_147_483_647
 
 /** The task text blocks a run accepts. */
 export type PromptBlocks = readonly { readonly type: string; readonly text?: string }[]
@@ -47,6 +55,29 @@ export interface CleanupReport {
   readonly confirmed: boolean
   /** Why confirmation was impossible, when it was. */
   readonly detail?: string
+}
+
+/** Physical facts about one attempt, separate from the model's terminal turn. */
+export interface CodexRunExecution {
+  readonly runId: string
+  readonly startedAt: string
+  readonly finishedAt: string
+  readonly durationMs: number
+  readonly threadId: string | null
+  readonly turnId: string | null
+  readonly pid: number | null
+  readonly supervisorPid: number | null
+  readonly exitCode: number | null
+  readonly signal: NodeJS.Signals | null
+  readonly supervisorExitCode: number | null
+  readonly supervisorSignal: NodeJS.Signals | null
+  readonly terminationRequested: boolean
+  readonly timedOut: boolean
+  readonly cancelled: boolean
+  readonly truncated: boolean
+  readonly spawnError: string | null
+  readonly failure: FailureFacts | null
+  readonly ownership: 'supervised-group' | 'owned-process'
 }
 
 /** Everything one run needs that does not change between attempts. */
@@ -118,6 +149,8 @@ export interface CodexRunSpec {
   readonly env?: Readonly<Record<string, string>> | undefined
   /** Grace between termination tiers. */
   readonly disposeGraceMs?: number | undefined
+  /** Maximum stdout/stderr bytes before a non-successful, truncated result. */
+  readonly maxOutputBytes?: number | undefined
   /** Narrates notable child activity, for a caller that reports progress. */
   readonly onProgress?: ((text: string) => void) | undefined
 }
@@ -150,6 +183,9 @@ export interface CodexRunOutcome {
   readonly configuration?: AppliedConfiguration | undefined
   /** Whether the process range is confirmed gone. */
   readonly cleanup: CleanupReport
+  readonly execution: CodexRunExecution
+  /** A turn request is evidence of acceptance, not a server effort echo. */
+  readonly turnConfiguration?: TurnConfiguration | undefined
   /** Parsed structured result, only when a schema was supplied and verification passed. */
   readonly structured?: unknown
   /** Why structured verification failed, when it did. */
@@ -174,6 +210,19 @@ interface ManagedChild {
   readonly done: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>
   terminate(graceMs: number): Promise<CleanupReport>
   waitForExit(timeoutMs: number): Promise<boolean>
+  outputIncomplete(): boolean
+  supervisorFailed(): boolean
+  releaseUnconfirmed(): void
+  facts(): {
+    pid: number | null
+    supervisorPid: number | null
+    exitCode: number | null
+    signal: NodeJS.Signals | null
+    supervisorExitCode: number | null
+    supervisorSignal: NodeJS.Signals | null
+    terminationRequested: boolean
+    spawnError: string | null
+  }
 }
 
 /**
@@ -187,7 +236,7 @@ interface ManagedChild {
 export const DEFAULT_RUN_TIMEOUT_MS = 600_000
 
 /** The failure taxonomy carried out of a run. */
-interface FailureFacts {
+export interface FailureFacts {
   readonly stage: string
   readonly category: string
   readonly httpStatus?: number
@@ -197,8 +246,19 @@ interface FailureFacts {
 export class CodexRunFailure extends Error {
   readonly facts: FailureFacts
   readonly cleanup: CleanupReport | undefined
+  readonly execution: CodexRunExecution | undefined
+  readonly configuration: AppliedConfiguration | undefined
+  readonly usage: CodexUsageReport | undefined
+  readonly rateLimits: CodexRateLimitsReport | undefined
+  readonly turnConfiguration: TurnConfiguration | undefined
 
-  constructor(facts: FailureFacts, cause?: unknown, cleanup?: CleanupReport) {
+  constructor(facts: FailureFacts, cause?: unknown, cleanup?: CleanupReport, observations?: {
+    execution?: CodexRunExecution
+    configuration?: AppliedConfiguration | undefined
+    usage?: CodexUsageReport
+    rateLimits?: CodexRateLimitsReport
+    turnConfiguration?: TurnConfiguration | undefined
+  }) {
     const cleanupDetail = cleanup?.confirmed === false
       ? `; process cleanup unconfirmed${cleanup.detail === undefined ? '' : `: ${cleanup.detail}`}`
       : ''
@@ -206,6 +266,11 @@ export class CodexRunFailure extends Error {
       cause === undefined ? undefined : { cause })
     this.facts = facts
     this.cleanup = cleanup
+    this.execution = observations?.execution
+    this.configuration = observations?.configuration
+    this.usage = observations?.usage
+    this.rateLimits = observations?.rateLimits
+    this.turnConfiguration = observations?.turnConfiguration
     this.name = 'CodexRunFailure'
   }
 }
@@ -225,6 +290,12 @@ function describeFacts(facts: FailureFacts): string {
 /** Normalise an unknown throwable. */
 function thrown(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
+}
+
+/** A valid snapshot before interruption is a known lower bound, not a final bill. */
+function partialUsage(usage: CodexUsageReport, reason: string): CodexUsageReport {
+  if (usage.status !== 'complete') return usage
+  return { ...usage, status: 'partial', reason: usage.reason === undefined ? reason : `${usage.reason}; ${reason}` }
 }
 
 /** A short non-throwing delay. */
@@ -268,82 +339,218 @@ export function textTask(prompt: PromptBlocks): string[] {
  */
 function spawnAppServer(spec: CodexRunSpec): ManagedChild {
   const posix = process.platform !== 'win32'
-  const proc = spawn(spec.command, ['app-server', '--stdio'], {
+  const graceMs = spec.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS
+  // tsc rewrites import specifiers, not new URL strings. Native TS tests and
+  // the built npm package must each start their matching guardian artifact.
+  const extension = import.meta.url.endsWith('.ts') ? '.ts' : '.js'
+  const guardian = fileURLToPath(new URL(`./process-guardian${extension}`, import.meta.url))
+  const proc = spawn(posix ? process.execPath : spec.command,
+    posix ? [guardian, spec.command, String(graceMs)] : ['app-server', '--stdio'], {
     cwd: spec.cwd,
     env: { ...process.env, ...spec.env },
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: posix ? ['pipe', 'pipe', 'pipe', 'ipc'] : ['pipe', 'pipe', 'pipe'],
     detached: posix,
     windowsHide: true,
+  }) as ChildProcessWithoutNullStreams
+  let actualPid: number | null = posix ? null : proc.pid ?? null
+  let actualExit: { exitCode: number | null, signal: NodeJS.Signals | null } | undefined
+  let stdoutEnded = false
+  let drainTimer: NodeJS.Timeout | undefined
+  let outputIncomplete = false
+  let supervisorFailed = false
+  let supervisorExit: { exitCode: number | null, signal: NodeJS.Signals | null } | undefined
+  let spawnError: string | null = null
+  let terminationRequested = false
+  let completeActual!: (value: { exitCode: number | null, signal: NodeJS.Signals | null }) => void
+  let failActual!: (error: Error) => void
+  const done = new Promise<{ exitCode: number | null, signal: NodeJS.Signals | null }>((resolve, reject) => {
+    completeActual = resolve
+    failActual = reject
   })
-  const done = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    proc.once('error', reject)
-    proc.once('close', (exitCode, signal) => { resolve({ exitCode, signal }) })
-  })
-  // A spawn error is delivered as a rejection; observe it even when the caller
-  // races it elsewhere so it can never become an unhandled rejection.
   done.catch(() => {})
-
+  proc.stdout.once('end', () => {
+    stdoutEnded = true
+    if (drainTimer !== undefined) clearTimeout(drainTimer)
+    drainTimer = undefined
+    if (actualExit !== undefined) completeActual(actualExit)
+    else if (supervisorFailed || supervisorExit !== undefined) {
+      failActual(new CodexRunFailure({ stage: 'supervisor', category: 'process' }))
+    }
+  })
+  proc.on('message', (message: unknown) => {
+    if (message === null || typeof message !== 'object') return
+    const value = message as Record<string, unknown>
+    if (value.type === 'started' && Number.isSafeInteger(value.pid) && Number(value.pid) > 0) {
+      actualPid = Number(value.pid)
+    } else if (value.type === 'exit') {
+      actualExit = {
+        exitCode: typeof value.exitCode === 'number' ? value.exitCode : null,
+        signal: typeof value.signal === 'string' ? value.signal as NodeJS.Signals : null,
+      }
+      if (stdoutEnded) completeActual(actualExit)
+      else if (drainTimer === undefined) {
+        // IPC and stdout use different pipes. Drain already-written final
+        // frames before declaring an early exit, but never wait indefinitely
+        // for a descendant that inherited stdout (even with runTimeoutMs=0).
+        drainTimer = setTimeout(() => {
+          outputIncomplete = true
+          failActual(new Error('app-server exited but its output did not drain within 1000 ms'))
+        }, EXIT_DRAIN_TIMEOUT_MS)
+        drainTimer.unref?.()
+      }
+    } else if (value.type === 'spawn-error') {
+      spawnError = typeof value.message === 'string' ? value.message : 'app-server spawn failed'
+      failActual(new Error(spawnError))
+    }
+  })
+  const supervisorDone = new Promise<void>((resolve) => {
+    proc.once('error', (error) => {
+      spawnError = error.message
+      failActual(error)
+      resolve()
+    })
+    proc.once('exit', (exitCode, signal) => {
+      if (posix) {
+        supervisorExit = { exitCode, signal }
+        supervisorFailed ||= !terminationRequested
+        // Guardian liveness cannot depend on stdio close: its Codex child may
+        // still hold the inherited pipe. Allow queued final IPC/stdout frames
+        // a bounded drain, then fail and let the caller terminate the group.
+        if (actualExit === undefined && drainTimer === undefined) {
+          drainTimer = setTimeout(() => {
+            outputIncomplete = !stdoutEnded
+            failActual(new CodexRunFailure({ stage: 'supervisor', category: 'process' }))
+          }, EXIT_DRAIN_TIMEOUT_MS)
+          drainTimer.unref?.()
+        }
+      } else {
+        actualExit = { exitCode, signal }
+        if (stdoutEnded) completeActual(actualExit)
+        else if (drainTimer === undefined) {
+          drainTimer = setTimeout(() => {
+            outputIncomplete = true
+            failActual(new CodexRunFailure({ stage: 'process', category: 'output-incomplete' }))
+          }, EXIT_DRAIN_TIMEOUT_MS)
+          drainTimer.unref?.()
+        }
+      }
+      resolve()
+    })
+    proc.once('disconnect', () => {
+      if (!posix || terminationRequested) return
+      supervisorFailed = true
+      if (actualExit !== undefined && stdoutEnded) completeActual(actualExit)
+      else if (stdoutEnded) failActual(new CodexRunFailure({ stage: 'supervisor', category: 'process' }))
+      else if (drainTimer === undefined) {
+        drainTimer = setTimeout(() => {
+          outputIncomplete = !stdoutEnded
+          failActual(new CodexRunFailure({ stage: 'supervisor', category: 'process' }))
+        }, EXIT_DRAIN_TIMEOUT_MS)
+        drainTimer.unref?.()
+      }
+    })
+    proc.once('close', (exitCode, signal) => {
+      if (drainTimer !== undefined) clearTimeout(drainTimer)
+      if (posix) supervisorExit = { exitCode, signal }
+      else {
+        actualExit = { exitCode, signal }
+        completeActual(actualExit)
+      }
+      // A guardian exit is not an app-server exit. In particular, a group KILL
+      // can prevent the guardian from sending the actual child's final facts.
+      if (actualExit === undefined) failActual(new Error('Codex guardian exited before an app-server exit receipt'))
+      resolve()
+    })
+  })
   const groupPid = posix ? proc.pid : undefined
   let termination: Promise<CleanupReport> | undefined
+  const signalErrors: string[] = []
 
-  const groupAlive = (): boolean => {
+  const groupState = (): { alive: boolean | undefined, detail?: string } => {
     if (groupPid !== undefined) {
       try {
         process.kill(-groupPid, 0)
-        return true
+        return { alive: true }
       } catch (error: unknown) {
-        return (error as NodeJS.ErrnoException).code === 'EPERM'
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return { alive: false }
+        return { alive: undefined, detail: `cannot inspect the owned process group: ${thrown(error).message}` }
       }
     }
-    return proc.exitCode === null && proc.signalCode === null
+    return { alive: proc.exitCode === null && proc.signalCode === null }
   }
 
   const sendSignal = (signal: NodeJS.Signals): void => {
+    terminationRequested = true
     try {
       if (groupPid !== undefined) process.kill(-groupPid, signal)
       else proc.kill(signal)
-    } catch {
-      // ESRCH: the range is already gone. Other failures are reported by the
-      // final liveness check rather than thrown out of cleanup.
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        signalErrors.push(`${signal}: ${thrown(error).message}`)
+      }
     }
   }
 
-  const waitForExit = (timeoutMs: number): Promise<boolean> => {
-    const exited = done.then(() => true, () => true)
-    if (timeoutMs <= 0) {
-      // A zero wait still observes an already-settled process.
-      return Promise.race([exited, Promise.resolve(false)])
-    }
-    return Promise.race([
-      exited,
-      delay(timeoutMs).then(() => false),
-    ])
-  }
+  const waitForExit = (timeoutMs: number): Promise<boolean> => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs))
+    supervisorDone.then(() => { clearTimeout(timer); resolve(true) })
+  })
 
-  const terminate = (graceMs: number): Promise<CleanupReport> => {
+  const terminate = (grace: number): Promise<CleanupReport> => {
     if (termination !== undefined) return termination
     termination = (async (): Promise<CleanupReport> => {
-      if (proc.pid === undefined) {
-        // No OS process was created (for example, ENOENT); there is no owned
-        // range to leave behind.
-        return { confirmed: true }
-      }
+      if (proc.pid === undefined) return { confirmed: true }
       sendSignal('SIGTERM')
-      await waitForExit(graceMs)
-      if (groupAlive()) {
+      await waitForExit(grace)
+      if (groupState().alive !== false) {
         sendSignal('SIGKILL')
-        await waitForExit(Math.min(Math.max(graceMs, 250), GROUP_REAP_TIMEOUT_MS))
+        await waitForExit(Math.min(Math.max(grace, 250), GROUP_REAP_TIMEOUT_MS))
       }
-      const until = Date.now() + GROUP_REAP_TIMEOUT_MS
-      while (groupAlive() && Date.now() < until) await delay(25)
-      return groupAlive()
-        ? { confirmed: false, detail: 'the owned process group was still alive after SIGKILL' }
-        : { confirmed: true }
+      const until = performance.now() + GROUP_REAP_TIMEOUT_MS
+      let state = groupState()
+      while (state.alive !== false && performance.now() < until) {
+        await delay(25)
+        state = groupState()
+      }
+      // A signal can race the guardian's own group KILL. In particular, Darwin
+      // can return EPERM while a group contains only exiting/zombie members.
+      // That error is not proof of disappearance, but a later independent
+      // ESRCH is. Do not let a historical signal error override that proof.
+      if (state.alive === false) return { confirmed: true }
+      return {
+        confirmed: false,
+        detail: [...signalErrors, state.detail ?? 'the owned process group was still alive after SIGKILL'].join('; '),
+      }
     })()
     return termination
   }
 
-  return { proc, done, terminate, waitForExit }
+  return {
+    proc, done, terminate, waitForExit,
+    outputIncomplete: () => outputIncomplete,
+    supervisorFailed: () => supervisorFailed,
+    releaseUnconfirmed: () => {
+      // A failed signal must not keep the caller alive forever through its
+      // own pipe/IPC references. Closing the lease lets the guardian make an
+      // independent cleanup attempt. This is not confirmation: the already
+      // failed receipt stays failed even if that later attempt succeeds.
+      try { if (proc.connected) proc.disconnect() } catch { /* lease already closed */ }
+      for (const stream of [proc.stdin, proc.stdout, proc.stderr]) {
+        try { stream.destroy() } catch { /* already closed */ }
+      }
+      proc.unref()
+    },
+    facts: () => ({
+      pid: actualPid,
+      supervisorPid: posix ? proc.pid ?? null : null,
+      exitCode: actualExit?.exitCode ?? null,
+      signal: actualExit?.signal ?? null,
+      supervisorExitCode: supervisorExit?.exitCode ?? null,
+      supervisorSignal: supervisorExit?.signal ?? null,
+      terminationRequested,
+      spawnError,
+    }),
+  }
 }
 
 /** Build the argv, for diagnostics and tests. */
@@ -389,12 +596,59 @@ export async function startCodexRun(
   spec: CodexRunSpec,
   signal: AbortSignal,
 ): Promise<StartedCodexRun> {
-  const texts = textTask(prompt)
-  if (signal.aborted) throw new CodexRunFailure({ stage: 'initialize', category: 'aborted' })
-
-  const graceMs = spec.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS
+  const id = randomUUID()
   const startedAt = Date.now()
+  const startedMonotonic = performance.now()
+  let timedOut = false
+  let callerAborted = false
+  let truncated = false
+  let initialSpawnError: string | null = null
+  let observedChild: ManagedChild | undefined
+  let observedWire: CodexAppServerWire | undefined
+  const execution = (failure: FailureFacts | null): CodexRunExecution => ({
+    runId: id,
+    startedAt: new Date(startedAt).toISOString(),
+    finishedAt: new Date().toISOString(),
+    durationMs: Math.max(0, performance.now() - startedMonotonic),
+    threadId: observedWire?.threadId ?? null,
+    turnId: observedWire?.turnId ?? null,
+    ...(observedChild?.facts() ?? {
+      pid: null, supervisorPid: null, exitCode: null, signal: null,
+      supervisorExitCode: null, supervisorSignal: null,
+      terminationRequested: false, spawnError: initialSpawnError,
+    }),
+    timedOut, cancelled: callerAborted || signal.aborted,
+    truncated: truncated || observedChild?.outputIncomplete() === true, failure,
+    ownership: process.platform === 'win32' ? 'owned-process' : 'supervised-group',
+  })
+  const graceMs = spec.disposeGraceMs ?? DEFAULT_DISPOSE_GRACE_MS
   const requestedTimeout = spec.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS
+  const maxOutputBytes = spec.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
+  let texts: string[]
+  try {
+    texts = textTask(prompt)
+    if (!Number.isSafeInteger(graceMs) || graceMs < 0 || graceMs > 30_000) {
+      throw new Error('disposeGraceMs must be an integer between 0 and 30000')
+    }
+    if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
+      throw new Error('maxOutputBytes must be a positive safe integer')
+    }
+    if (!Number.isSafeInteger(requestedTimeout) || requestedTimeout < 0 || requestedTimeout > MAX_TIMER_MS) {
+      throw new Error('runTimeoutMs must be an integer between 0 and 2147483647')
+    }
+    if (spec.deadlineAt !== undefined && (!Number.isSafeInteger(spec.deadlineAt) || spec.deadlineAt <= 0
+      || spec.deadlineAt - startedAt > MAX_TIMER_MS)) {
+      throw new Error('deadlineAt must be a positive safe timestamp within the supported timer range')
+    }
+  } catch (error: unknown) {
+    const facts = { stage: 'request', category: 'invalid-request' }
+    throw new CodexRunFailure(facts, error, { confirmed: true }, { execution: execution(facts) })
+  }
+  if (signal.aborted) {
+    callerAborted = true
+    const facts = { stage: 'initialize', category: 'aborted' }
+    throw new CodexRunFailure(facts, undefined, { confirmed: true }, { execution: execution(facts) })
+  }
   const deadlineAt = spec.deadlineAt
     ?? (requestedTimeout > 0 ? startedAt + requestedTimeout : undefined)
   const timeoutDescriptionMs = deadlineAt === undefined ? requestedTimeout : Math.max(1, deadlineAt - startedAt)
@@ -402,10 +656,25 @@ export async function startCodexRun(
   let child: ManagedChild
   try {
     child = spawnAppServer(spec)
+    observedChild = child
   } catch (error: unknown) {
-    throw new CodexRunFailure({ stage: 'initialize', category: 'process' }, error)
+    initialSpawnError = thrown(error).message
+    const facts = { stage: 'initialize', category: 'process' }
+    throw new CodexRunFailure(facts, error, { confirmed: true }, { execution: execution(facts) })
   }
 
+  const runAbort = new AbortController()
+  let outputBytes = 0
+  const limitOutput = (chunk: Buffer | string): void => {
+    outputBytes += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.byteLength
+    if (outputBytes <= maxOutputBytes || truncated) return
+    truncated = true
+    runAbort.abort(new Error(`codex-pro: output exceeded ${String(maxOutputBytes)} bytes`))
+    child.proc.stdout.destroy()
+    child.proc.stderr.destroy()
+  }
+  child.proc.stdout.on('data', limitOutput)
+  child.proc.stderr.on('data', limitOutput)
   const transport = new LineTransport(child.proc.stdin, child.proc.stdout)
   const wire = new CodexAppServerWire(
     child.proc.stdout,
@@ -418,8 +687,10 @@ export async function startCodexRun(
       originator: spec.originator ?? DEFAULT_ORIGINATOR,
     },
   )
+  observedWire = wire
   if (spec.onProgress !== undefined) wire.setProgressReporter(spec.onProgress)
   const forwardStderr = (chunk: Buffer | string): void => {
+    if (truncated) return
     try {
       process.stderr.write(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
     } catch {
@@ -428,23 +699,23 @@ export async function startCodexRun(
   }
   child.proc.stderr.on('data', forwardStderr)
 
-  const runAbort = new AbortController()
-  let timedOut = false
-  let callerAborted = false
   let timer: NodeJS.Timeout | undefined
-  const requestCancel = (): void => {
+  const abortRun = (): void => {
     if (runAbort.signal.aborted) return
     runAbort.abort(new Error('codex-pro: run cancelled locally'))
     wire.interrupt()
   }
-  const onCallerAbort = (): void => {
+  const requestCancel = (): void => {
     callerAborted = true
+    abortRun()
+  }
+  const onCallerAbort = (): void => {
     requestCancel()
   }
   if (deadlineAt !== undefined) {
     timer = setTimeout(() => {
       timedOut = true
-      requestCancel()
+      abortRun()
     }, Math.max(0, deadlineAt - Date.now()))
     timer.unref?.()
   }
@@ -456,11 +727,14 @@ export async function startCodexRun(
   const teardown = async (): Promise<CleanupReport> => {
     if (timer !== undefined) clearTimeout(timer)
     timer = undefined
-    signal.removeEventListener('abort', onCallerAbort)
     wire.close()
     try { child.proc.stdin.end() } catch { /* already closed */ }
     const cleanup = await child.terminate(graceMs)
+    if (!cleanup.confirmed) child.releaseUnconfirmed()
+    signal.removeEventListener('abort', onCallerAbort)
     child.proc.stderr.off('data', forwardStderr)
+    child.proc.stdout.off('data', limitOutput)
+    child.proc.stderr.off('data', limitOutput)
     return cleanup
   }
   let tornDown: Promise<CleanupReport> | undefined
@@ -473,7 +747,7 @@ export async function startCodexRun(
       throw new CodexRunFailure(processFailureFacts)
     },
     (error: unknown) => {
-      processFailureFacts = { stage: 'process', category: 'process' }
+      processFailureFacts = error instanceof CodexRunFailure ? error.facts : { stage: 'process', category: 'process' }
       throw new CodexRunFailure(processFailureFacts, error)
     },
   )
@@ -502,13 +776,22 @@ export async function startCodexRun(
       await Promise.race([wire.setThreadName(spec.threadName, runAbort.signal), processFailure])
     }
   } catch (error: unknown) {
+    const failureStage = processFailureFacts === undefined ? startupStage : 'process'
     const cleanup = await teardownOnce()
-    throw startupFailure(
-      processFailureFacts === undefined ? startupStage : 'process',
+    const failure = startupFailure(
+      failureStage,
       error,
       { timedOut, callerAborted },
       cleanup,
     )
+    const facts = truncated ? { stage: startupStage, category: 'output-limit' }
+      : child.outputIncomplete() ? { stage: startupStage, category: 'output-incomplete' }
+        : failure.facts
+    throw new CodexRunFailure(facts, error, cleanup, {
+      execution: execution(facts), configuration: wire.configuration,
+      usage: partialUsage(wire.usageReport, 'startup ended without a completed turn'), rateLimits: wire.rateLimitsReport,
+      turnConfiguration: wire.turnConfiguration,
+    })
   }
 
   const finish = async (
@@ -516,17 +799,39 @@ export async function startCodexRun(
       readonly stopReason: CodexStopReason, readonly images: readonly CodexImage[] } | undefined,
     error: unknown,
   ): Promise<CodexRunOutcome> => {
+    let failure: FailureFacts | null = error instanceof CodexRunFailure
+      ? error.facts
+      : error === undefined ? null : { stage: 'turn', category: 'protocol' }
     const cleanup = await teardownOnce()
-    const usage = wire.usageReport
+    callerAborted ||= signal.aborted
+    const effectiveTruncated = truncated || child.outputIncomplete()
+    const usage = turn === undefined || timedOut || callerAborted || effectiveTruncated || !cleanup.confirmed
+      ? partialUsage(wire.usageReport, 'run ended without a reliable terminal usage boundary')
+      : wire.usageReport
     const rateLimits = wire.rateLimitsReport
     const configuration = wire.configuration
     const observedImages = turn?.images ?? wire.images
     let output = turn?.output ?? wire.partialOutput
-    let stopReason: CodexStopReason = turn?.stopReason
-      ?? (timedOut ? 'timeout' : callerAborted || runAbort.signal.aborted ? 'aborted' : 'error')
+    let stopReason: CodexStopReason = effectiveTruncated ? 'error'
+      : timedOut ? 'timeout'
+        : callerAborted ? 'aborted'
+          : turn?.stopReason ?? 'error'
     let diagnostic = wire.collectDiagnostic()
     let structured: unknown
     let schemaError: string | undefined
+
+    const processFacts = child.facts()
+    if (child.supervisorFailed()) {
+      if (stopReason === 'completed') stopReason = 'error'
+      failure = { stage: 'supervisor', category: 'process' }
+      diagnostic = 'Codex guardian exited before cleanup was requested'
+    }
+    if ((processFacts.exitCode !== null && processFacts.exitCode !== 0)
+      || (processFacts.signal !== null && !['SIGTERM', 'SIGKILL'].includes(processFacts.signal))) {
+      if (stopReason === 'completed') stopReason = 'error'
+      failure = { stage: 'process', category: 'process' }
+      diagnostic = `app-server exited unexpectedly (code=${String(processFacts.exitCode)}, signal=${String(processFacts.signal)})`
+    }
 
     if (spec.outputSchema !== undefined && stopReason === 'completed') {
       const text = output.map((block) => block.text).join('\n\n')
@@ -538,24 +843,39 @@ export async function startCodexRun(
         // A schema was requested: an unparseable or invalid answer is not a
         // structured success. Preserve the raw output and say why it failed.
         if (stopReason === 'completed') stopReason = 'error'
+        failure = { stage: 'output', category: 'schema' }
         diagnostic = diagnostic === undefined ? schemaError : `${diagnostic}; ${schemaError}`
       }
     }
 
     if (!cleanup.confirmed) {
+      if (stopReason === 'completed') stopReason = 'error'
+      failure ??= { stage: 'cleanup', category: 'cleanup' }
       const cleanupDetail = `process cleanup could not be confirmed${cleanup.detail === undefined ? '' : `: ${cleanup.detail}`}`
       diagnostic = diagnostic === undefined ? cleanupDetail : `${diagnostic}; ${cleanupDetail}`
     }
-    if (timedOut) {
+    if (effectiveTruncated) {
+      if (truncated) failure = { stage: 'output', category: 'output-limit' }
+      else failure ??= { stage: 'output', category: 'output-incomplete' }
+      const detail = truncated
+        ? `codex-pro: output exceeded ${String(maxOutputBytes)} bytes and was truncated`
+        : 'codex-pro: app-server output could not be completely drained'
+      diagnostic = diagnostic === undefined ? detail : `${diagnostic}; ${detail}`
+    } else if (timedOut) {
+      failure = { stage: 'turn', category: 'timeout' }
       const timeoutDetail = describeTimeout(timeoutDescriptionMs)
       diagnostic = diagnostic === undefined ? timeoutDetail : `${diagnostic}; ${timeoutDetail}`
     } else if (callerAborted) {
+      failure = { stage: 'turn', category: 'aborted' }
       const abortDetail = 'codex-pro: the delegation was cancelled by its caller'
       diagnostic = diagnostic === undefined ? abortDetail : `${diagnostic}; ${abortDetail}`
     } else if (error !== undefined && diagnostic === undefined) {
       diagnostic = error instanceof Error ? error.message : String(error)
     } else if (error !== undefined && !(error instanceof CodexRunFailure)) {
       diagnostic = `${diagnostic}; ${error instanceof Error ? error.message : String(error)}`
+    }
+    if (stopReason !== 'completed' && failure === null) {
+      failure = { stage: 'turn', category: stopReason }
     }
 
     return {
@@ -568,6 +888,8 @@ export async function startCodexRun(
       rateLimits,
       ...(configuration === undefined ? {} : { configuration }),
       cleanup,
+      execution: execution(failure),
+      ...(wire.turnConfiguration === undefined ? {} : { turnConfiguration: wire.turnConfiguration }),
       ...(structured === undefined ? {} : { structured }),
       ...(schemaError === undefined ? {} : { schemaError }),
     }
@@ -592,7 +914,7 @@ export async function startCodexRun(
   })()
 
   return {
-    id: randomUUID(),
+    id,
     result,
     requestCancel,
     teardown: teardownOnce,
@@ -686,6 +1008,8 @@ export interface DelegatedCodexRun {
   readonly rateLimits: CodexRateLimitsReport
   readonly configuration?: AppliedConfiguration
   readonly cleanup: CleanupReport
+  readonly execution: CodexRunExecution
+  readonly turnConfiguration?: TurnConfiguration
   readonly structured?: unknown
 }
 
@@ -708,6 +1032,8 @@ export async function runCodexOnce(
     readonly images?: readonly string[] | undefined
     readonly outputSchema?: Record<string, unknown> | undefined
     readonly env?: Readonly<Record<string, string>> | undefined
+    readonly disposeGraceMs?: number | undefined
+    readonly maxOutputBytes?: number | undefined
     readonly signal: AbortSignal
     readonly onStart?: ((id: string) => void) | undefined
     readonly onProgress?: ((text: string) => void) | undefined
@@ -730,6 +1056,8 @@ export async function runCodexOnce(
       outputSchema: options.outputSchema,
       threadName: options.threadName,
       env: options.env,
+      disposeGraceMs: options.disposeGraceMs,
+      maxOutputBytes: options.maxOutputBytes,
       onProgress: options.onProgress,
     },
     options.signal,
@@ -777,6 +1105,8 @@ export async function delegateOnce(options: {
   /** A JSON Schema the final answer must conform to. */
   readonly outputSchema?: Record<string, unknown> | undefined
   readonly env?: Readonly<Record<string, string>> | undefined
+  readonly disposeGraceMs?: number | undefined
+  readonly maxOutputBytes?: number | undefined
   readonly signal: AbortSignal
   /** Called once the run is published, for diagnostics. */
   readonly onStart?: (id: string) => void
@@ -806,6 +1136,8 @@ export async function delegateOnce(options: {
     rateLimits: outcome.rateLimits,
     ...(outcome.configuration === undefined ? {} : { configuration: outcome.configuration }),
     cleanup: outcome.cleanup,
+    execution: outcome.execution,
+    ...(outcome.turnConfiguration === undefined ? {} : { turnConfiguration: outcome.turnConfiguration }),
     ...(outcome.structured === undefined ? {} : { structured: outcome.structured }),
   }
 }

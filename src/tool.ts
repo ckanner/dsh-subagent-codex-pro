@@ -10,9 +10,8 @@
  *
  * So this plugin registers the tool itself, the way the LCU plugin registers
  * `js`: on `agent/created`, into that agent's own context. `model` and
- * `reasoning_effort` appear only while the host's model-selection opt-in is
- * enabled, so an Agent cannot route itself to a model the user has not
- * authorized.
+ * `reasoning_effort` appear while this plugin's modelSelection setting is
+ * enabled; that setting is independent of the Host LLM route picker.
  *
  * @module dsh-subagent-codex-pro/tool
  */
@@ -51,7 +50,7 @@ export interface CodexToolOptions {
   /** Default reasoning effort when a call does not name one. */
   readonly reasoningEffort?: string
   /**
-   * Whether the host opted in to Agent-chosen models.
+   * Whether the plugin permits Agent-chosen Codex models.
    *
    * When false the tool exposes no `model` or `reasoning_effort`, exactly as the
    * harness's own delegation tools behave — the user's authorization is the only
@@ -168,10 +167,11 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         },
         permission_mode: {
           type: 'string',
-          enum: ['read-only', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox'],
+          enum: ['read-only', 'workspace-write', 'never', 'approve-for-me', 'dangerously-bypass-approvals-and-sandbox'],
           description: 'Permission mode for this delegation. `read-only` is the safe Review mode:'
-            + ' approvalPolicy=never plus a read-only sandbox, so the run cannot write or execute'
-            + ' without an approval it never asks for. `never` alone is not read-only. Omit to use'
+            + ' approvalPolicy=never plus a read-only sandbox. `workspace-write` combines never with'
+            + ' the workspace-write sandbox. Per-call overrides may only narrow the configured policy.'
+            + ' `never` alone is not read-only. Omit to use'
             + ' the provider configuration; leave the configured write mode alone for implementation work.',
         },
         ...options.modelSelectionEnabled
@@ -290,13 +290,14 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ? request.output_schema as Record<string, unknown>
         : undefined
       const permissionMode = request.permission_mode === 'read-only'
+        || request.permission_mode === 'workspace-write'
         || request.permission_mode === 'never'
         || request.permission_mode === 'approve-for-me'
         || request.permission_mode === 'dangerously-bypass-approvals-and-sandbox'
         ? request.permission_mode as CodexPermissionMode
         : undefined
       if (request.permission_mode !== undefined && permissionMode === undefined) {
-        throw new Error('subagent_codex: permission_mode must be one of read-only, never, '
+        throw new Error('subagent_codex: permission_mode must be one of read-only, workspace-write, never, '
           + 'approve-for-me, dangerously-bypass-approvals-and-sandbox')
       }
       const images = Array.isArray(request.images)

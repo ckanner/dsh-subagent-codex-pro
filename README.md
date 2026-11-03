@@ -14,6 +14,23 @@ tools.subagent_codex({
 })
 ```
 
+## 0.8.0 integration and migration
+
+The plugin now exposes a versioned [machine API and CLI](docs/machine.md) for
+orchestrators, alongside its DSH tool/provider. Both use the same supervised
+Codex app-server runner. See the [Flywheel, preparation and PR guide](docs/orchestration.zh.md).
+
+The default permission is now **workspace-write + never**. Existing profiles
+that explicitly configured full access keep that explicit choice; profiles that
+omitted it receive the new bounded default. Per-call overrides can narrow the
+configured policy, not silently expand it. Required effective configuration
+fields must be present and match before a task is sent. DSH provider/maxTokens
+overrides that this Codex backend cannot honor are rejected.
+
+The complete machine receipt includes configuration, effort-request evidence,
+usage completeness, actual process facts and cleanup. DSH Host results retain
+the official narrow shape. Full details never require parsing the diagnostic log.
+
 ## The gap this fills
 
 `subagent_codex`'s schema exposes only `description` and `prompt`, so a caller
@@ -136,10 +153,12 @@ dsh plugin --profile desktop add link:/path/to/dsh-subagent-codex-pro
 ## Verify
 
 ```sh
-npm install
+npm ci --ignore-scripts
 npm run typecheck
 npm test                                  # offline suite; live cases skip
 CODEX_SUBAGENT_LIVE=1 npm test            # extra real turn through the live Codex
+npm run build
+npm run test:package                      # install and run the actual tarball
 npm run test:coverage                     # Node's built-in coverage report
 ```
 
@@ -155,15 +174,14 @@ run done: text=8B thread=… images=0 usage=complete(312 tokens) cleanup=confirm
 run config: requested={"cwd":"…","approvalPolicy":"never","sandbox":"read-only"} effective={"cwd":"…","approvalPolicy":"never","sandbox":"read-only"}
 ```
 
-A verified end-to-end run: 30 s wall clock, the model's `PROBE_OK` returned as
+Historical 0.7.0 observation: 30 s wall clock, the model's `PROBE_OK` returned as
 the tool result. The live app-server test opens a thread and puts `effort` on the
 turn; it does **not** claim a thread-level thinking level, which 0.165/0.166 do
 not accept.
 
 ## Verification layers
 
-This hardening distinguishes three layers rather than calling one of them
-"verified" for all:
+The 0.8.0 verification matrix includes real fake-process tests and installed-tarball smoke tests on Ubuntu/macOS and Node 22/24. The live observations below are a **historical 0.7.0 baseline**, not a new live run of 0.8.0:
 
 1. **Offline / hermetic** — the default `npm test` suite. It drives the real
    protocol classes and a real child process through a scripted fake app-server:
@@ -183,8 +201,8 @@ This hardening distinguishes three layers rather than calling one of them
    the same `codex app-server --stdio` path.
 3. **Real DSH desktop end-to-end** — still not run. The implementation keeps
    the existing DSH provider/tool/job contracts; a desktop smoke test remains
-   the one unexecuted layer. v0.7.0 is released through the repository's
-   tag-driven workflow; the user's global Codex login/config was not modified.
+   unexecuted layer. Real model and desktop tests have not been rerun for 0.8.0.
+   Neither CI nor the package smoke changes a user login or calls a model.
 
 ## Making the answer machine-readable
 
@@ -382,12 +400,12 @@ The timeout, a caller cancellation, a protocol failure, and an unexpected proces
 categories. Settlement happens once; teardown is idempotent. A failed resume that is being repaired by a fresh
 thread shares the original absolute deadline, so the retry cannot borrow a second full timeout.
 
-**Cleanup is proven, not assumed.** On POSIX the app-server is the leader of its own process group. Teardown
-sends `SIGTERM` to the whole group, waits the configured grace (`disposeGraceMs`, default 3 s), then `SIGKILL`
-and polls until the group is gone. A descendant that outlives its parent is reported as
-`cleanup: { confirmed: false, detail: … }` rather than treated as cleaned; the custom tool turns an
-unconfirmed cleanup into an explicit failure. There is no global `killall codex`. On Windows the direct child is
-managed; process-range confirmation is a POSIX guarantee.
+**Cleanup is checked against the owned range.** On POSIX a guardian leads the process group and Codex
+shares that group. An IPC lifeline is established during spawn; caller death triggers bounded guardian
+cleanup. The live caller still confirms that the group has disappeared. Actual Codex and guardian
+exit facts remain separate; an unknown exit is never fabricated as zero. Unconfirmed cleanup prevents
+success and makes Host dispose reject. The Windows Host path controls its direct process only;
+the machine entry requires POSIX. See [ownership and cancellation](docs/machine.md#cancellation-and-process-ownership).
 
 | | |
 |---|---|
@@ -432,22 +450,24 @@ through a plan-usage route measured 0%, because that route refuses every cache c
 
 ## Permissions, including read-only review
 
-The permission mode is the plugin's unattended policy, not an approval prompt. The default is deliberately the
-write-capable mode needed for implementation work; this change does not alter it globally.
+The default is **workspace-write**: approvalPolicy=never with the explicit
+workspace-write sandbox. Full access requires an explicit plugin configuration
+or an explicit machine request; it is never a fallback for a failed sandbox.
 
-| mode | Codex `approvalPolicy` | `sandbox` | use |
+| mode | Codex approvalPolicy | sandbox | use |
 |---|---|---|---|
-| `dangerously-bypass-approvals-and-sandbox` | `never` | `danger-full-access` | default implementation work |
-| `approve-for-me` | `on-request` | `workspace-write` | agent runs write-capable work with a reviewer for approvals |
-| `never` | `never` | omitted | no approval prompts, but **not read-only** |
-| `read-only` | `never` | `read-only` | review/inspection that must not write or execute |
+| workspace-write | never | workspace-write | default implementation work |
+| read-only | never | read-only | independent review and inspection |
+| dangerously-bypass-approvals-and-sandbox | never | danger-full-access | explicit full-access configuration only |
+| approve-for-me | on-request | workspace-write | legacy policy using the approval reviewer |
+| never | never | omitted | legacy no-prompt mode, not a known sandbox |
 
-`approvalPolicy: 'never'` only means "do not ask a human"; it says nothing about the filesystem or execution
-sandbox. A real read-only Review mode therefore needs `sandbox: 'read-only'`, which the new `read-only` mode
-sends on both `thread/start` and `thread/resume`. The same modes are available as a per-call
-`permission_mode`, so a caller can review read-only while leaving the configured default write mode alone.
-The requested and effective permission facts are recorded in the run outcome and the diagnostic log; a
-response that ignored them fails unpublished.
+A per-call permission can keep its configured mode, narrow to read-only, or
+narrow explicit full access to workspace-write. Other changes require editing
+the plugin configuration. The machine API accepts only the three explicit
+sandbox modes. Required cwd/model/approval/sandbox response fields must be
+present, well typed and match. Complete observed sandbox policy remains in the
+receipt; matched fields alone do not prove an OS sandbox was tested.
 
 ## Usage and rate limits
 
@@ -460,7 +480,7 @@ The tracker folds notifications into one run report:
 - `run` is the delta from the observed baseline, never a sum of notification snapshots.
 - A pre-turn replay after resume becomes the baseline and contributes no run usage.
 - A resume with no replay before its first live snapshot is `partial`; the report never invents a zero.
-- Duplicate and out-of-order snapshots are ignored; a counter that moves backwards marks the report `partial`
+- Duplicate and out-of-order snapshots are ignored; malformed events or a counter that moves backwards mark the report `partial`
   rather than producing negative usage.
 - Usage from another thread/turn is not added.
 - No observation is `unknown` with no `run`, never a fake `0`; an observation that arrived before a failure,
@@ -472,7 +492,8 @@ The tracker folds notifications into one run report:
 not merged into it. Both are exposed on `CodexRunOutcome` / `delegateOnce` results and written to the diagnostic
 log. The DSH `SubagentResult` and tool-result contracts have no `usage`/`rateLimits` field, so the provider and
 custom tool do not invent host fields; the tool result remains content-only, and the background job result
-remains the contract's string. The diagnostic log is the host-visible surface for this information.
+remains the contract's string. DSH users can inspect the diagnostic log; external
+orchestrators obtain the complete observations through the public machine API/CLI.
 
 ## Background runs and progress
 
@@ -499,8 +520,8 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 | schema-enforced answer (`output_schema`, or the harness's row setting) | ✅ verified locally |
 | `run_in_background` + progress via `job_output` | ✅ |
 | read-only review permission (`read-only`) | ✅ `approvalPolicy=never` + `sandbox=read-only` |
-| token usage / model context window | ✅ internal outcome + diagnostic log; DSH result/tool/job contracts carry no usage field |
-| account rate limits | ✅ separate from token usage; internal/log only |
+| token usage / model context window | ✅ public machine receipt + internal outcome; DSH result/tool/job contracts retain their official shapes |
+| account rate limits | ✅ separate from token usage; included in the public machine receipt |
 | process-range cleanup with confirmation | ✅ POSIX; unconfirmed is reported |
 | deadline covers startup and turn; user cancel distinct | ✅ |
 | app-server protocol (handshake, thread lifecycle, approval decisions) | ✅ |
@@ -515,6 +536,7 @@ Codex through its own configuration instead. And a **persona** is a system instr
 this one already takes the task in `prompt`. Declaring any of them `true` would promise the harness an
 enforcement that does not exist.
 
-The official provider remains the better choice where protocol fidelity matters.
-This exists because it cannot express these two choices, and should be retired
-once upstream can.
+Use the official provider when its configuration and result contract meet your
+needs. This package adds per-call configuration and a public machine receipt
+for external orchestrators. Its compatibility is checked against the documented
+DSH/Codex baselines; new upstream releases still require contract verification.

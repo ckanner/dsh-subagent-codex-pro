@@ -15,6 +15,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 import { LineTransport } from '../src/jsonrpc.ts'
 import { CodexAppServerWire, type CodexPermissionMode } from '../src/wire.ts'
@@ -114,11 +117,24 @@ function harness(options: {
   return { wire, peer }
 }
 
+/** A complete 0.165/0.166 thread reply for ordinary successful fixture runs. */
+function threadResponse(params: unknown, id = 'thread-1', ephemeral = true): Record<string, unknown> {
+  const requested = params as Record<string, unknown>
+  const sandbox = requested.sandbox ?? 'workspace-write'
+  const type = sandbox === 'read-only' ? 'readOnly'
+    : sandbox === 'workspace-write' ? 'workspaceWrite' : 'dangerFullAccess'
+  return {
+    thread: { id, ephemeral }, model: requested.model ?? 'server-default',
+    cwd: requested.cwd ?? '/work', approvalPolicy: requested.approvalPolicy ?? 'never',
+    approvalsReviewer: requested.approvalsReviewer ?? 'user', sandbox: { type }, reasoningEffort: 'low',
+  }
+}
+
 /** The default peer: handshake, thread, turn, one final answer, completion. */
 function standardPeer(effortAware = true): (method: string, params: unknown, peer: Peer) => unknown {
-  return (method, _params, peer) => {
+  return (method, params, peer) => {
     if (method === 'initialize') return {}
-    if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+    if (method === 'thread/start') return threadResponse(params)
     if (method === 'turn/start') {
       // Answer asynchronously so turn/start resolves before the turn ends.
       setImmediate(() => {
@@ -131,7 +147,7 @@ function standardPeer(effortAware = true): (method: string, params: unknown, pee
       })
       return { turn: { id: 'turn-1' } }
     }
-    if (!effortAware && method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+    if (!effortAware && method === 'thread/start') return threadResponse(params)
     return undefined
   }
 }
@@ -183,10 +199,10 @@ test('an omitted effort leaves both fields off the wire', async () => {
 test('the handshake completes initialize then initialized before thread/start', async () => {
   const order: string[] = []
   const { wire, peer } = harness({
-    respond: (method) => {
+    respond: (method, params) => {
       order.push(method)
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+      if (method === 'thread/start') return threadResponse(params)
       return undefined
     },
   })
@@ -199,9 +215,9 @@ test('the handshake completes initialize then initialized before thread/start', 
 
 test('the final answer wins over an unphased one, and commentary is ignored', async () => {
   const { wire, peer } = harness({
-    respond: (method, _params, self) => {
+    respond: (method, params, self) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+      if (method === 'thread/start') return threadResponse(params)
       if (method === 'turn/start') {
         setImmediate(() => {
           for (const [phase, text] of [['commentary', 'thinking'], [null, 'unphased'], ['partial_answer', 'partial'], ['final_answer', 'the answer']] as const) {
@@ -230,9 +246,9 @@ test('a partial answer is the fallback when no final answer arrives', async () =
   // output or tool calls may follow. DSH 0.2.1's official adapter selects
   // final -> partial -> unphased; a run with only a partial answer must not fail.
   const { wire, peer } = harness({
-    respond: (method, _params, self) => {
+    respond: (method, params, self) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+      if (method === 'thread/start') return threadResponse(params)
       if (method === 'turn/start') {
         setImmediate(() => {
           for (const [phase, text] of [['commentary', 'thinking'], [null, 'unphased'], ['partial_answer', 'stable answer']] as const) {
@@ -261,9 +277,9 @@ test('a failing turn surfaces the taxonomy and a context overflow stops as max-t
     [{ id: 'turn-1', status: 'failed', error: { codexErrorInfo: 'contextWindowExceeded' } }, 'max-tokens'],
   ] as const) {
     const { wire, peer } = harness({
-      respond: (method, _params, self) => {
+      respond: (method, params, self) => {
         if (method === 'initialize') return {}
-        if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+        if (method === 'thread/start') return threadResponse(params)
         if (method === 'turn/start') {
           setImmediate(() => {
             self.notify('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', phase: 'final_answer', text: 'partial' } })
@@ -289,9 +305,9 @@ test('a failing turn surfaces the taxonomy and a context overflow stops as max-t
 
 test('an unattended approval request is declined, and recorded as a diagnostic', async () => {
   const { wire, peer } = harness({
-    respond: (method, _params, self) => {
+    respond: (method, params, self) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+      if (method === 'thread/start') return threadResponse(params)
       if (method === 'turn/start') {
         setImmediate(() => {
           // A server request: the wire must answer it with a decision.
@@ -331,9 +347,9 @@ test('an unattended approval request is declined, and recorded as a diagnostic',
 
 test('a non-ephemeral thread is rejected', async () => {
   const { wire, peer } = harness({
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: false } }
+      if (method === 'thread/start') return threadResponse(params, 'thread-1', false)
       return undefined
     },
   })
@@ -349,9 +365,9 @@ test('the wire narrates child activity, and a broken reporter cannot stop the ru
   const lines: string[] = []
   let calls = 0
   const { wire, peer } = harness({
-    respond: (method, _params, self) => {
+    respond: (method, params, self) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+      if (method === 'thread/start') return threadResponse(params)
       if (method === 'turn/start') {
         setImmediate(() => {
           self.notify('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'commandExecution', status: 'completed', command: 'ls -la' } })
@@ -390,9 +406,9 @@ test('the wire narrates child activity, and a broken reporter cannot stop the ru
 test('persistent mode asks for a durable thread and reports its id', async () => {
   const { wire, peer } = harness({
     threadMode: 'persistent',
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-9', ephemeral: false } }
+      if (method === 'thread/start') return threadResponse(params, 'thread-9', false)
       return undefined
     },
   })
@@ -406,9 +422,9 @@ test('persistent mode asks for a durable thread and reports its id', async () =>
 test('persistent mode is rejected when the app-server downgrades it', async () => {
   const { wire, peer } = harness({
     threadMode: 'persistent',
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-1', ephemeral: true } }
+      if (method === 'thread/start') return threadResponse(params)
       return undefined
     },
   })
@@ -422,7 +438,7 @@ test('persistent mode is rejected when the app-server downgrades it', async () =
 
 test('resumeThread continues a thread without restating unset values', async () => {
   const { wire, peer } = harness({
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
       if (method === 'thread/resume') return { thread: { id: 'thread-7', ephemeral: false } }
       return undefined
@@ -471,7 +487,7 @@ test('resumeThread applies explicit model, cwd and permission overrides', async 
 
 test('resumeThread fails when the app-server ignored a requested override', async () => {
   const { wire } = harness({
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
       if (method === 'thread/resume') {
         return {
@@ -500,6 +516,140 @@ test('read-only permission is never confused with approvalPolicy=never alone', a
   const params = peer.paramsOf('thread/start')
   assert.equal(params.approvalPolicy, 'never')
   assert.equal(params.sandbox, 'read-only')
+})
+
+for (const method of ['thread/start', 'thread/resume'] as const) {
+  for (const field of ['model', 'cwd', 'approvalPolicy', 'sandbox'] as const) {
+    for (const malformed of [false, true]) {
+      test(`${method} rejects ${malformed ? 'malformed' : 'missing'} effective ${field} before a turn`, async () => {
+        const { wire, peer } = harness({
+          model: 'gpt-required', permissionMode: 'read-only',
+          respond: (name, params) => {
+            if (name === 'initialize') return {}
+            if (name === method) {
+              const reply = threadResponse(params, 'thread-1', method === 'thread/start')
+              if (malformed) reply[field] = field === 'sandbox' ? { type: 'unknownPolicy' } : 42
+              else delete reply[field]
+              return reply
+            }
+            return undefined
+          },
+        })
+        await wire.initialize()
+        const startup = method === 'thread/start'
+          ? wire.startThread('/work')
+          : wire.resumeThread('thread-1', { model: 'gpt-required', cwd: '/work', permission: 'read-only' })
+        await assert.rejects(startup, /missing or invalid/)
+        assert.equal(wire.configuration?.source, method)
+        assert.equal(wire.configuration?.matched, false)
+        assert.deepEqual(wire.configuration?.missing, [field])
+        assert.equal(wire.configuration?.effective[field], undefined)
+        await assert.rejects(wire.runTurn(['must not send']), /verified thread configuration/)
+        assert.equal(peer.received.some(request => request.method === 'turn/start'), false)
+        wire.close()
+      })
+    }
+  }
+}
+
+test('requested reviewer cannot be silently absent from an auto-review configuration', async () => {
+  const { wire } = harness({
+    permissionMode: 'approve-for-me',
+    respond: (method, params) => {
+      if (method === 'initialize') return {}
+      if (method !== 'thread/start') return undefined
+      const reply = threadResponse(params)
+      delete reply.approvalsReviewer
+      return reply
+    },
+  })
+  await wire.initialize()
+  await assert.rejects(wire.startThread('/work'), /missing or invalid approvalsReviewer/)
+  assert.deepEqual(wire.configuration?.missing, ['approvalsReviewer'])
+  wire.close()
+})
+
+test('workspace-write sends never and an explicit sandbox and preserves the whole effective policy', async () => {
+  const policy = {
+    type: 'workspaceWrite', writableRoots: ['/work', '/extra'], networkAccess: false,
+    readOnlyAccess: { type: 'fullAccess' }, excludeTmpdirEnvVar: true, excludeSlashTmp: true,
+  }
+  const { wire, peer } = harness({
+    permissionMode: 'workspace-write',
+    respond: (method, params) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return { ...threadResponse(params), sandbox: policy }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  await wire.startThread('/work')
+  assert.equal(peer.paramsOf('thread/start').approvalPolicy, 'never')
+  assert.equal(peer.paramsOf('thread/start').sandbox, 'workspace-write')
+  assert.equal(wire.configuration?.matched, true)
+  assert.deepEqual(wire.configuration?.effective.sandboxPolicy, policy)
+  assert.deepEqual(wire.configuration?.missing, [])
+  assert.deepEqual(wire.configuration?.mismatches, [])
+  wire.close()
+})
+
+test('effective model mismatch is rejected without echoing untrusted protocol values', async () => {
+  const { wire } = harness({
+    model: 'requested-model',
+    respond: (method, params) => method === 'initialize' ? {}
+      : method === 'thread/start' ? { ...threadResponse(params), model: 'UNTRUSTED_PRIVATE_RESPONSE' } : undefined,
+  })
+  await wire.initialize()
+  await assert.rejects(wire.startThread('/work'), (error: unknown) => {
+    assert.match(String(error), /mismatched model/)
+    assert.doesNotMatch(String(error), /UNTRUSTED_PRIVATE_RESPONSE/)
+    return true
+  })
+  assert.deepEqual(wire.configuration?.mismatches, ['model'])
+  wire.close()
+})
+
+test('cwd aliases for the same existing directory compare by physical identity', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-wire-cwd-'))
+  try {
+    const physical = join(dir, 'physical')
+    const alias = join(dir, 'alias')
+    mkdirSync(physical)
+    symlinkSync(physical, alias)
+    const { wire } = harness({
+      respond: (method, params) => method === 'initialize' ? {}
+        : method === 'thread/start' ? { ...threadResponse(params), cwd: physical } : undefined,
+    })
+    await wire.initialize()
+    await wire.startThread(alias)
+    assert.equal(wire.configuration?.matched, true)
+    assert.equal(wire.configuration?.effective.cwd, physical)
+    wire.close()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a relative effective cwd is invalid even when lexical resolution matches the request', async () => {
+  const { wire } = harness({
+    respond: (method, params) => method === 'initialize' ? {}
+      : method === 'thread/start' ? { ...threadResponse(params), cwd: '.' } : undefined,
+  })
+  await wire.initialize()
+  await assert.rejects(wire.startThread(process.cwd()), /missing or invalid cwd/)
+  assert.deepEqual(wire.configuration?.missing, ['cwd'])
+  wire.close()
+})
+
+test('per-turn effort has request evidence, never a fabricated effective value from thread history', async () => {
+  const { wire } = harness({ respond: standardPeer() })
+  await wire.initialize()
+  await wire.startThread('/work')
+  assert.equal(wire.configuration?.effective.reasoningEffort, 'low')
+  await wire.runTurn(['review'], undefined, 'high')
+  assert.equal(wire.turnId, 'turn-1')
+  assert.deepEqual(wire.turnConfiguration, {
+    requestedEffort: 'high', effectiveEffort: null, evidence: 'turn/start-request', accepted: true,
+  })
+  wire.close()
 })
 
 test('token usage is folded from cumulative totals and rate limits stay separate', async () => {
@@ -577,9 +727,75 @@ test('a resumed thread treats a pre-turn usage replay as a baseline', async () =
   assert.equal(usage.run?.totalTokens, 300)
 })
 
+test('wire associates live usage that precedes the turn/start response with the confirmed resumed turn', async () => {
+  const breakdown = (total: number) => ({
+    totalTokens: total, inputTokens: total, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    outputTokens: 0, reasoningOutputTokens: 0,
+  })
+  const note = (turnId: string, total: number) => ({
+    threadId: 'thread-7', turnId,
+    tokenUsage: { total: breakdown(total), last: breakdown(1), modelContextWindow: 272000 },
+  })
+  const { wire } = harness({
+    permissionMode: 'read-only', model: 'gpt-required',
+    respond: (method, params, peer) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/resume') {
+        peer.notify('thread/tokenUsage/updated', note('old-turn', 1000))
+        return threadResponse(params, 'thread-7', false)
+      }
+      if (method === 'turn/start') {
+        peer.notify('turn/started', { threadId: 'thread-7', turn: { id: 'turn-2' } })
+        peer.notify('thread/tokenUsage/updated', note('turn-2', 1100))
+        peer.notify('thread/tokenUsage/updated', note('turn-2', 1150))
+        peer.notify('thread/tokenUsage/updated', note('turn-2', 1150))
+        peer.notify('item/completed', { threadId: 'thread-7', turnId: 'turn-2', item: { type: 'agentMessage', phase: 'final_answer', text: 'FINAL' } })
+        peer.notify('turn/completed', { threadId: 'thread-7', turn: { id: 'turn-2', status: 'completed' } })
+        return { turn: { id: 'turn-2' } }
+      }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  await wire.resumeThread('thread-7', { model: 'gpt-required', cwd: '/work', permission: 'read-only' })
+  await wire.runTurn(['go'])
+  assert.equal(wire.usageReport.status, 'complete')
+  assert.equal(wire.usageReport.run?.totalTokens, 150)
+  assert.equal(wire.usageReport.replayedBaseline, true)
+  wire.close()
+})
+
+test('wire preserves malformed and missing-identity usage as partial instead of complete', async () => {
+  const breakdown = { totalTokens: 100, inputTokens: 100, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 }
+  const { wire, peer } = harness({
+    respond: (method, params, peer) => {
+      if (method === 'initialize') return {}
+      if (method === 'thread/start') return threadResponse(params)
+      if (method === 'turn/start') {
+        peer.notify('thread/tokenUsage/updated', { threadId: 'thread-1', turnId: 'turn-1', tokenUsage: { total: breakdown } })
+        peer.notify('thread/tokenUsage/updated', { threadId: 'thread-1', turnId: 'turn-1', tokenUsage: null })
+        peer.notify('thread/tokenUsage/updated', { turnId: 'turn-1', tokenUsage: { total: breakdown } })
+        peer.notify('item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', phase: 'final_answer', text: 'FINAL' } })
+        peer.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } })
+        return { turn: { id: 'turn-1' } }
+      }
+      return undefined
+    },
+  })
+  await wire.initialize()
+  await wire.startThread('/work')
+  await wire.runTurn(['go'])
+  assert.equal(wire.usageReport.status, 'partial')
+  assert.equal(wire.usageReport.run?.totalTokens, 100)
+  wire.close()
+  const closed = wire.usageReport
+  peer.notify('thread/tokenUsage/updated', { threadId: 'thread-1', tokenUsage: null })
+  assert.deepEqual(wire.usageReport, closed)
+})
+
 test('resumeThread refuses a reply about another thread', async () => {
   const { wire, peer } = harness({
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
       if (method === 'thread/resume') return { thread: { id: 'someone-else' } }
       return undefined
@@ -605,9 +821,9 @@ test('the originator reaches initialize, and defaults to Codex Desktop', async (
 test('a persistent thread can be named, and naming never fails the run', async () => {
   const { wire, peer } = harness({
     threadMode: 'persistent',
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-5', ephemeral: false } }
+      if (method === 'thread/start') return threadResponse(params, 'thread-5', false)
       if (method === 'thread/name/set') return {}
       return undefined
     },
@@ -631,9 +847,9 @@ test('a persistent thread can be named, and naming never fails the run', async (
 test('naming failure is reported, not thrown', async () => {
   const { wire, peer } = harness({
     threadMode: 'persistent',
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-6', ephemeral: false } }
+      if (method === 'thread/start') return threadResponse(params, 'thread-6', false)
       return undefined
     },
   })
@@ -644,9 +860,9 @@ test('naming failure is reported, not thrown', async () => {
   // reports as a false rather than letting it fail the run.
   const failing = harness({
     threadMode: 'persistent',
-    respond: (method) => {
+    respond: (method, params) => {
       if (method === 'initialize') return {}
-      if (method === 'thread/start') return { thread: { id: 'thread-7', ephemeral: false } }
+      if (method === 'thread/start') return threadResponse(params, 'thread-7', false)
       if (method === 'thread/name/set') return FAIL
       return undefined
     },
