@@ -502,6 +502,13 @@ function spawnAppServer(spec: CodexRunSpec): ManagedChild {
       if (proc.pid === undefined) return { confirmed: true }
       sendSignal('SIGTERM')
       await waitForExit(grace)
+      // A caller-requested guardian exit can happen before a descendant that
+      // inherited stdout has let the stream drain. Give the existing drain
+      // timer its bounded window before killing the group, so a held pipe is
+      // still reported as output-incomplete instead of being silently closed.
+      if (actualExit !== undefined && !stdoutEnded && !outputIncomplete) {
+        await delay(EXIT_DRAIN_TIMEOUT_MS)
+      }
       if (groupState().alive !== false) {
         sendSignal('SIGKILL')
         await waitForExit(Math.min(Math.max(grace, 250), GROUP_REAP_TIMEOUT_MS))

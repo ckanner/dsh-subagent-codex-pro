@@ -3,7 +3,7 @@
 ## 0.8.0 (unreleased)
 
 - Add the public protocol-1 machine API and single-request CLI, preserving run identity, actual process facts, configuration and usage completeness without changing DSH Host result shapes.
-- Supervise POSIX Codex groups with an IPC-lifeline guardian so caller death triggers bounded cleanup; never substitute supervisor exit for the actual Codex exit.
+- Supervise POSIX Codex groups with an IPC-lifeline guardian so caller death triggers bounded cleanup; never substitute supervisor exit for the actual Codex exit. A live caller's normal stop now exits the guardian as soon as the app-server is gone instead of paying the full dispose grace; caller-death cleanup keeps the full grace.
 - Confirm cleanup from a final independent absence probe, retaining unknown status for EPERM while allowing a later ESRCH to resolve a Darwin exit race.
 - Reject missing or conflicting effective configuration before sending a task. Preserve full sandbox policy and request-only effort evidence.
 - Default to workspace-write + never; full access remains explicit and tool overrides cannot expand configured permissions.
