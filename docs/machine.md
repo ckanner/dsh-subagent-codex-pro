@@ -1,8 +1,13 @@
 # Machine API and CLI (protocol 1)
 
-Version 0.8.0 adds a public entry for orchestrators that need the complete outcome
+Version 0.8.0 introduced a public entry for orchestrators that need the complete outcome
 without a DSH parent Agent. It uses the same app-server runner, configuration
 checks, usage tracker and process guardian as the DSH provider and tool.
+
+The **0.9.0 unreleased source candidate** adds [typed lifecycle and read-only
+recovery](machine-lifecycle.md) ([中文](machine-lifecycle.zh.md)). The result protocol
+remains 1. The single-document CLI remains terminal-only; durable ACKs use the
+JavaScript API. Existing DSH callers do not opt into this additional supervisor.
 
 ## Install and inspect
 
@@ -59,9 +64,9 @@ of a sandbox: inspect the complete returned sandboxPolicy, including writable
 roots and network settings, against the caller's requirements.
 
 The default thread is ephemeral. A resumed thread must be persistent; threadId
-never silently changes to a new thread after failure. Execute and independent
-review should use fresh calls. Orchestrators, rather than model conversation
-history, own retries and durable task state.
+never silently changes to a new thread after failure. Execute and independent review must have separate role histories. The owning
+orchestrator may explicitly resume each role within its scope. Orchestrators
+own retries, compatibility, durable task state and current-candidate validation.
 
 The CLI prints exactly one JSON object on stdout. App-server diagnostics may go
 to stderr. Exit 0 means a completed turn and confirmed cleanup; exit 1 means a
@@ -84,9 +89,10 @@ if (!receipt.ok) {
 ```
 
 `parseMachineRequest` validates untrusted input. `runMachine` rejects invalid
-input with MachineInputError; valid attempts return a receipt even when startup,
-authentication, configuration, cancellation or cleanup fails. Options may supply
-a trusted env override and onProgress callback; environment values and prompts
+input with MachineInputError; ordinary run failures preserve receipts. A failed
+supervisor or journal can reject without a terminal handoff: callers must recover
+known durable evidence and otherwise remain blocked. Options may supply a trusted
+env override, onProgress, awaitable onLifecycle, and a new recoveryDirectory; environment values and prompts
 are never copied into the receipt's requested-configuration fields.
 
 ## Receipt contract
@@ -149,8 +155,10 @@ Machine execution requires POSIX and rejects Windows before spawning Codex;
 capabilities reports supported=false there. Processes that deliberately escape
 with a new session/group require a stronger external containment boundary. The
 legacy Windows Host adapter controls a direct process and reports owned-process;
-it must not be advertised as the POSIX group guarantee. A killed caller cannot
-write a final receipt: its outer owner must record interruption, not success.
+it must not be advertised as the POSIX group guarantee. Without lifecycle/journal options, a killed caller cannot write a final receipt.
+With them, the independent machine supervisor can finish native cleanup and save
+the actual receipt. Losing that supervisor too can still leave unknown facts;
+read-only recovery never guesses them from a PID or starts a replacement turn.
 
 ## DSH and Flywheel compatibility
 
@@ -165,7 +173,7 @@ DSH Mac rc.5's SDK has no external-subagent/start RPC. Host startActivation need
 a real live parent Agent. An orchestrator should call this machine entry instead
 of inventing a parent or treating codex-pro as a DSH LLM provider.
 
-Flywheel 0.27.3 does not yet consume this API. A downstream consumer must add a
+The original 0.8.0 integration baseline was Flywheel 0.27.3. A downstream consumer must implement a
 separate driver, pass the worktree/model/effort/permission/deadline/request ID,
 validate the receipt and sandbox policy, preserve unknown usage and physical
 facts, and retain Go ownership of reports, tests, retries, commits and budgets.

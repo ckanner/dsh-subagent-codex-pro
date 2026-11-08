@@ -1,11 +1,12 @@
 /** Versioned, host-independent entry point for deterministic orchestrators. */
-import { randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
-import {
-  CodexRunFailure, DEFAULT_RUN_TIMEOUT_MS, startCodexRun,
-  type CodexRunOutcome, type CodexRunSpec,
-} from './run.ts'
-import type { CodexPermissionMode } from './wire.ts'
+import type { CodexRunFailure, CodexRunOutcome } from './run.ts'
+import { runMachineLocal } from './machine-local.ts'
+import { superviseMachine } from './machine-supervision.ts'
+import { validateRecoveryDirectory, type MachineLifecycleEvent } from './machine-recovery.ts'
+
+export { MACHINE_LIFECYCLE_VERSION, MACHINE_LIFECYCLE_CAPABILITIES, recoverMachine } from './machine-recovery.ts'
+export type { MachineLifecycleEvent, MachineRecoveryRequest, MachineRecoveryReceipt } from './machine-recovery.ts'
 
 export const MACHINE_PROTOCOL_VERSION = 1 as const
 
@@ -31,6 +32,10 @@ export interface MachineOptions {
   readonly signal?: AbortSignal
   readonly env?: Readonly<Record<string, string>>
   readonly onProgress?: (text: string) => void
+  /** Returning resolves the caller's durable checkpoint ACK. Rejection stops dispatch. */
+  readonly onLifecycle?: (event: MachineLifecycleEvent) => Promise<void> | void
+  /** A NEW private directory; its canonical parent must already exist. Never reused. */
+  readonly recoveryDirectory?: string
 }
 
 /** The result is not mixed into the model's structured answer or human thread marker. */
@@ -79,6 +84,7 @@ function textField(input: Record<string, unknown>, key: string, optional = false
   if (typeof value !== 'string' || value.trim() === '' || value.includes('\0')) {
     throw new MachineInputError(key + ' must be a nonempty string without NUL')
   }
+  if (key === 'requestId' && Buffer.byteLength(value) > 4096) throw new MachineInputError('requestId exceeds 4096 bytes')
 }
 
 /** Validate before starting any process; unknown options never silently disappear. */
@@ -124,72 +130,26 @@ export function parseMachineRequest(value: unknown): MachineRequest {
   return input as unknown as MachineRequest
 }
 
-/** Bound a diagnostic without retaining arbitrary server output. */
-function boundedDiagnostic(value: string): string {
-  return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '?').slice(0, 4096)
-}
-
-/** Include the cause of a startup failure, which carries the actionable reason. */
-function failureDiagnostic(error: CodexRunFailure | undefined): string {
-  if (error === undefined) return 'codex-pro: run could not be initialized'
-  const cause = (error as Error & { cause?: unknown }).cause
-  const causeMessage = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : undefined
-  const base = error.message
-  const detail = causeMessage === undefined || base.includes(causeMessage)
-    ? base
-    : base + ': ' + causeMessage
-  return boundedDiagnostic(detail)
-}
-
 /** A machine run never invents an exit code, usage, effective effort, or dollar cost. */
 export async function runMachine(value: MachineRequest, options: MachineOptions = {}): Promise<MachineReceipt> {
   const request = parseMachineRequest(value)
   if (process.platform === 'win32') throw new MachineInputError('machine execution requires POSIX process-group supervision')
-  const requested = {
-    cwd: request.cwd, model: request.model, effort: request.effort,
-    permissionMode: request.permissionMode, threadId: request.threadId ?? null,
+  if (options === null || typeof options !== 'object' || Array.isArray(options)
+    || Object.keys(options).some(key => !['signal', 'env', 'onProgress', 'onLifecycle', 'recoveryDirectory'].includes(key))) {
+    throw new MachineInputError('machine options contain unsupported fields')
   }
-  const spec: CodexRunSpec = {
-    cwd: request.cwd,
-    command: request.command ?? 'codex',
-    model: request.model,
-    effort: request.effort,
-    permissionMode: request.permissionMode as CodexPermissionMode,
-    runTimeoutMs: request.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
-    threadMode: request.threadMode ?? (request.threadId === undefined ? 'ephemeral' : 'persistent'),
-    ...(request.threadId === undefined ? {} : { resumeThreadId: request.threadId }),
-    ...(request.maxOutputBytes === undefined ? {} : { maxOutputBytes: request.maxOutputBytes }),
-    ...(request.images === undefined ? {} : { images: request.images }),
-    ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
-    ...(options.env === undefined ? {} : { env: options.env }),
-    ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+  if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw new MachineInputError('signal must be an AbortSignal')
+  if (options.onProgress !== undefined && typeof options.onProgress !== 'function') throw new MachineInputError('onProgress must be a function')
+  if (options.env !== undefined && (options.env === null || typeof options.env !== 'object' || Array.isArray(options.env)
+    || Object.values(options.env).some(value => value !== undefined && (typeof value !== 'string' || value.includes('\0'))))) {
+    throw new MachineInputError('env must contain only string environment values')
   }
-  try {
-    const run = await startCodexRun([{ type: 'text', text: request.prompt }], spec, options.signal ?? new AbortController().signal)
-    const outcome = await run.result
-    return {
-      protocol: 1, type: 'result', requestId: request.requestId, runId: run.id,
-      ok: outcome.stopReason === 'completed' && outcome.cleanup.confirmed,
-      requested, outcome, failure: null, costUSD: null, costStatus: 'unknown',
-    }
-  } catch (error: unknown) {
-    const failure = error instanceof CodexRunFailure ? error : undefined
-    return {
-      protocol: 1, type: 'result', requestId: request.requestId,
-      runId: failure?.execution?.runId ?? randomUUID(), ok: false, requested, outcome: null,
-      failure: {
-        stage: failure?.facts.stage ?? 'initialize', category: failure?.facts.category ?? 'runtime',
-        diagnostic: failureDiagnostic(failure),
-        execution: failure?.execution ?? null,
-        configuration: failure?.configuration ?? null,
-        usage: failure?.usage ?? null,
-        rateLimits: failure?.rateLimits ?? null,
-        turnConfiguration: failure?.turnConfiguration ?? null,
-        cleanup: failure?.cleanup ?? null,
-      },
-      costUSD: null, costStatus: 'unknown',
-    }
+  if (options.onLifecycle !== undefined && typeof options.onLifecycle !== 'function') throw new MachineInputError('onLifecycle must be a function')
+  if (options.recoveryDirectory !== undefined) {
+    try { validateRecoveryDirectory(options.recoveryDirectory) } catch { throw new MachineInputError('invalid recoveryDirectory') }
   }
+  if (options.onLifecycle !== undefined || options.recoveryDirectory !== undefined) return superviseMachine(request, options)
+  return runMachineLocal(request, options)
 }
 
 export type { CodexRunOutcome } from './run.ts'

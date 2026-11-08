@@ -1,13 +1,13 @@
 // Exercise exactly the built npm tarball through public exports and its installed bin.
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const temp = mkdtempSync(join(tmpdir(), 'codex-pro-package-'))
+const temp = realpathSync(mkdtempSync(join(tmpdir(), 'codex-pro-package-')))
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const env = { ...process.env, CODEX_SUBAGENT_LIVE: '0' }
 function run(file, args, options = {}) {
@@ -37,6 +37,7 @@ try {
   assert.equal(capabilities.protocol, 1)
   assert.equal(capabilities.inferenceRequests, 0)
   assert.ok(capabilities.permissions.includes('workspace-write'))
+  assert.equal(capabilities.javascriptLifecycle.version, 1)
   const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
   assert.equal(run(bin, ['--version']).trim(), manifest.version)
   const receipt = JSON.parse(run(bin, ['--json'], { input: JSON.stringify(request) }))
@@ -53,9 +54,19 @@ try {
     + 'if (!receipt.ok) throw new Error(JSON.stringify(receipt));\n'
     + 'process.stdout.write(JSON.stringify({ok:receipt.ok,requestId:receipt.requestId}));\n')
   assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'consumer.mjs')])), { ok: true, requestId: 'packed-call' })
+  writeFileSync(join(install, 'recovery-consumer.mjs'),
+    'import { runMachine, recoverMachine, MACHINE_LIFECYCLE_VERSION } from "dsh-subagent-codex-pro/machine";\n'
+    + 'const events = []; const directory = ' + JSON.stringify(join(temp, 'recovery-journal')) + ';\n'
+    + 'const receipt = await runMachine(' + JSON.stringify(request) + ', { recoveryDirectory: directory, onLifecycle: e => { events.push(e.event); } });\n'
+    + 'const recovered = await recoverMachine({ protocol: 1, requestId: receipt.requestId, runId: receipt.runId, recoveryDirectory: directory });\n'
+    + 'if (!receipt.ok || JSON.stringify(recovered.receipt) !== JSON.stringify(receipt)) throw new Error("installed lifecycle evidence mismatch");\n'
+    + 'process.stdout.write(JSON.stringify({ version: MACHINE_LIFECYCLE_VERSION, status: recovered.status, events }));\n')
+  assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'recovery-consumer.mjs')])), {
+    version: 1, status: 'terminal', events: ['thread-ready', 'dispatch-intent', 'dispatch-possible', 'turn-accepted', 'terminal', 'cleanup-confirmed'],
+  })
   process.stdout.write(JSON.stringify({ ok: true, version: manifest.version,
     actualNpmInstall: true, publicMachineAPI: true, installedCLI: true,
-    builtGuardian: true, inferenceRequests: 0 }) + '\n')
+    builtGuardian: true, builtMachineSupervisor: true, durableLifecycle: true, readOnlyRecovery: true, inferenceRequests: 0 }) + '\n')
 } finally {
   rmSync(temp, { recursive: true, force: true })
 }

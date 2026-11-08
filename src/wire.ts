@@ -306,7 +306,7 @@ function abortError(signal: AbortSignal): Error {
  * @param signal - cancellation.
  * @returns the operation's value.
  */
-async function raceAbort<T>(pending: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+export async function raceAbort<T>(pending: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (signal === undefined) return pending
   if (signal.aborted) {
     pending.catch(() => {})
@@ -485,6 +485,7 @@ export class CodexAppServerWire {
   #fatal = Promise.withResolvers<never>()
   #threadId: string | undefined
   #turnId: string | undefined
+  #dispatch: 'not-dispatched' | 'possible' | 'accepted' = 'not-dispatched'
   #pendingTurnId: string | undefined
   #turnCompleted: { promise: Promise<TurnCompletion>; resolve: (value: TurnCompletion) => void } | undefined
   #earlyTurnNotifications: { method: string; params: unknown; order: number }[] = []
@@ -620,6 +621,7 @@ export class CodexAppServerWire {
     )
     const thread = object(response.thread, 'thread/start thread')
     const id = string(thread.id, 'thread/start thread id')
+    if (typeof thread.ephemeral !== 'boolean') throw new Error(`${P}: app-server omitted explicit thread persistence evidence`)
     const ephemeral = thread.ephemeral === true
     if (ephemeral !== (this.#threadMode === 'ephemeral')) {
       throw new Error(`${P}: app-server created a ${ephemeral ? 'ephemeral' : 'persistent'} thread `
@@ -767,6 +769,8 @@ export class CodexAppServerWire {
   get turnId(): string | undefined {
     return this.#turnId
   }
+  /** Conservative request boundary, not inferred from progress or a known PID. */
+  get dispatch(): 'not-dispatched' | 'possible' | 'accepted' { return this.#dispatch }
 
   /** Token usage attributable to this one delegation; never a zero guess. */
   get usageReport(): CodexUsageReport {
@@ -805,6 +809,7 @@ export class CodexAppServerWire {
     effort?: string,
     images: readonly string[] = [],
     outputSchema?: Record0,
+    lifecycle?: (stage: 'dispatch-intent' | 'dispatch-possible' | 'turn-accepted') => Promise<void>,
   ): Promise<WireRunResult> {
     const completion = Promise.withResolvers<TurnCompletion>()
     this.#turnCompleted = completion
@@ -812,6 +817,15 @@ export class CodexAppServerWire {
     if (threadId === undefined || this.#configuration?.matched !== true) {
       throw new Error(`${P}: cannot start a turn without verified thread configuration`)
     }
+    // These are programmatic persistence barriers, never model text or human
+    // approval. Mark possible BEFORE writing: a crash after that ACK must stay
+    // ambiguous unless a durable terminal receipt can be reconciled.
+    if (lifecycle !== undefined) {
+      await this.#guarded(lifecycle('dispatch-intent'), signal)
+      this.#dispatch = 'possible'
+      await this.#guarded(lifecycle('dispatch-possible'), signal)
+    }
+    this.#dispatch = 'possible'
     this.#usage.startTurnRequest()
     this.#turnConfiguration = {
       ...(effort === undefined ? {} : { requestedEffort: effort }),
@@ -844,6 +858,8 @@ export class CodexAppServerWire {
       this.#commitTurnId(string(turn.id, 'turn/start turn id'))
       this.#usage.beginTurn(string(turn.id, 'turn/start turn id'))
       this.#turnConfiguration = { ...this.#turnConfiguration, accepted: true }
+      this.#dispatch = 'accepted'
+      if (lifecycle !== undefined) await this.#guarded(lifecycle('turn-accepted'), signal)
     } catch (error: unknown) {
       this.#recordFailure({ stage: 'turn-start', category: 'unknown' })
       throw error

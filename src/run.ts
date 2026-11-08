@@ -24,6 +24,7 @@ import { verifyStructuredOutput } from './structured.ts'
 import {
   CodexAppServerWire,
   DEFAULT_ORIGINATOR,
+  raceAbort,
   type AppliedConfiguration,
   type CodexPermissionMode,
   type CodexRateLimitsReport,
@@ -60,6 +61,7 @@ export interface CleanupReport {
 /** Physical facts about one attempt, separate from the model's terminal turn. */
 export interface CodexRunExecution {
   readonly runId: string
+  readonly dispatch: 'not-dispatched' | 'possible' | 'accepted'
   readonly startedAt: string
   readonly finishedAt: string
   readonly durationMs: number
@@ -82,6 +84,8 @@ export interface CodexRunExecution {
 
 /** Everything one run needs that does not change between attempts. */
 export interface CodexRunSpec {
+  /** Internal machine correlation selected before the supervised run starts. */
+  readonly runId?: string
   /** The delegating session's working directory. */
   readonly cwd: string
   /** The Codex executable. */
@@ -153,6 +157,16 @@ export interface CodexRunSpec {
   readonly maxOutputBytes?: number | undefined
   /** Narrates notable child activity, for a caller that reports progress. */
   readonly onProgress?: ((text: string) => void) | undefined
+  /** Awaitable structured persistence barriers, independent from progress text. */
+  readonly onLifecycle?: ((event: CodexRunLifecycle) => Promise<void> | void) | undefined
+}
+
+export interface CodexRunLifecycle {
+  readonly event: 'thread-ready' | 'dispatch-intent' | 'dispatch-possible' | 'turn-accepted'
+  readonly runId: string
+  readonly threadId: string | null
+  readonly turnId: string | null
+  readonly configuration: AppliedConfiguration | null
 }
 
 /** What one finished run reports. */
@@ -613,7 +627,7 @@ export async function startCodexRun(
   spec: CodexRunSpec,
   signal: AbortSignal,
 ): Promise<StartedCodexRun> {
-  const id = randomUUID()
+  const id = spec.runId ?? randomUUID()
   const startedAt = Date.now()
   const startedMonotonic = performance.now()
   let timedOut = false
@@ -624,6 +638,7 @@ export async function startCodexRun(
   let observedWire: CodexAppServerWire | undefined
   const execution = (failure: FailureFacts | null): CodexRunExecution => ({
     runId: id,
+    dispatch: observedWire?.dispatch ?? 'not-dispatched',
     startedAt: new Date(startedAt).toISOString(),
     finishedAt: new Date().toISOString(),
     durationMs: Math.max(0, performance.now() - startedMonotonic),
@@ -770,6 +785,12 @@ export async function startCodexRun(
   )
   processFailure.catch(() => {})
 
+  const lifecycle = spec.onLifecycle === undefined ? undefined : async (event: CodexRunLifecycle['event']): Promise<void> => {
+    await raceAbort(Promise.race([Promise.resolve().then(() => spec.onLifecycle!({ event, runId: id,
+      threadId: wire.threadId ?? null, turnId: wire.turnId ?? null, configuration: wire.configuration ?? null })),
+    processFailure]), runAbort.signal)
+  }
+
   let startupStage = 'initialize'
   try {
     await Promise.race([wire.initialize(runAbort.signal), processFailure])
@@ -792,6 +813,7 @@ export async function startCodexRun(
       startupStage = 'thread-name'
       await Promise.race([wire.setThreadName(spec.threadName, runAbort.signal), processFailure])
     }
+    if (lifecycle !== undefined) await lifecycle('thread-ready')
   } catch (error: unknown) {
     const failureStage = processFailureFacts === undefined ? startupStage : 'process'
     const cleanup = await teardownOnce()
@@ -924,6 +946,7 @@ export async function startCodexRun(
           spec.effort ?? spec.reasoningEffort,
           spec.images ?? [],
           spec.outputSchema,
+          lifecycle,
         ),
         processFailure,
       ])

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.0 (source candidate, unreleased)
+
+- Add lifecycle v1 with awaited configuration-checked thread-ready, dispatch-intent,
+  dispatch-possible and turn-accepted checkpoints. A failed ACK cannot silently
+  continue a turn; the possible-send window remains explicitly ambiguous.
+- Add a separately grouped machine supervisor for opted-in lifecycle/journal
+  calls. Caller death aborts native work and persists the original complete
+  receipt; a lost terminal notification never rewrites a completed run as cancelled.
+- Add exclusive private, atomic and fsynced invocation journals plus a read-only
+  recoverMachine entry. Missing/corrupt evidence remains unknown, not a retry.
+- Record typed execution.dispatch without inferring model execution from a PID,
+  progress text, a thread ID, or cleanup success. Require explicit boolean
+  persistence evidence on thread/start.
+- Exercise real checkpoint rejection, caller process-group SIGKILL, original
+  receipt recovery and built-package lifecycle paths with offline app-server
+  fixtures. No new live-account or installed desktop acceptance is claimed.
+
 ## 0.8.0
 
 Released 2026-11-03.

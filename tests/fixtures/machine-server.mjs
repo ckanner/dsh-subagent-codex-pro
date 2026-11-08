@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // A real process implementing only the app-server messages needed by contract tests.
 import { createInterface } from 'node:readline'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, writeFileSync } from 'node:fs'
 const mode = process.env.FAKE_MACHINE_MODE ?? 'success'
+if (process.env.FAKE_MACHINE_PROCESS_FILE) writeFileSync(process.env.FAKE_MACHINE_PROCESS_FILE,
+  JSON.stringify({ pid: process.pid, processGroupId: process.ppid }))
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\n')
 const reply = (id, result) => send({ id, result })
 const notify = (method, params) => send({ method, params })
@@ -28,6 +30,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     if (mode === 'missing-model') delete result.model
     if (mode === 'wrong-ephemeral') result.thread.ephemeral = false
+    if (mode === 'missing-ephemeral') delete result.thread.ephemeral
     reply(message.id, result)
   } else if (message.method === 'turn/start') {
     reply(message.id, { turn: { id: 'machine-turn' } })
