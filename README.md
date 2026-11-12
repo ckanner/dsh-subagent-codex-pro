@@ -14,11 +14,11 @@ tools.subagent_codex({
 })
 ```
 
-## 0.9.0 source candidate: durable lifecycle and recovery
+## 0.9.0: durable lifecycle and recovery
 
 The public machine API now exposes awaitable typed checkpoints, a private
 per-invocation journal, and read-only recovery. An independent machine supervisor
-preserves the original terminal receipt after caller death. The source candidate
+preserves the original terminal receipt after caller death. This release
 is **not an npm release**. See the [lifecycle contract](docs/machine-lifecycle.md)
 and [中文说明](docs/machine-lifecycle.zh.md); existing DSH tool behavior is unchanged.
 

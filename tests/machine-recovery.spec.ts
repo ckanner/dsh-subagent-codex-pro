@@ -20,7 +20,9 @@ async function until(check: () => boolean, description: string, milliseconds = 1
 }
 function fixture(t: { after(fn: () => void): void }): { dir: string; request: MachineRequest; capture: string; journal: string } {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'codex-recovery-')))
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  // A killed child can still be releasing its last journal handle when the test
+  // ends; retry the removal instead of turning that teardown race into a failure.
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
   const command = join(dir, 'fake-codex.mjs')
   copyFileSync(fileURLToPath(new URL('./fixtures/machine-server.mjs', import.meta.url)), command)
   chmodSync(command, 0o755)

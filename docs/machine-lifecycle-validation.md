@@ -1,6 +1,6 @@
 # Lifecycle 1 validation record
 
-Validated on 2026-11-08 against the **0.9.0 unreleased source candidate**,
+Validated on 2026-11-08 against **0.9.0**,
 based on repository commit `04ecdb677735d84f3a0f5dba01a9d9b28c324c0e`.
 This records local Linux validation with Node 24.22.1 and npm 12.2.1. It does
 not claim a registry release, a macOS run, or a live Codex account acceptance.

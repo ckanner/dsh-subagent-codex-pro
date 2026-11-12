@@ -1,6 +1,6 @@
 # 结构化生命周期与只读恢复（lifecycle 1）
 
-本契约在 **0.9.0 未发布源码候选**中实现。公开
+本契约在 **0.9.0** 中实现。公开
 `dsh-subagent-codex-pro/machine` 结果协议仍为 1；lifecycle 是另行版本化的
 JavaScript 能力。单 JSON 输入的 CLI 与原 DSH Host/tool 输出保持原有方式。
 

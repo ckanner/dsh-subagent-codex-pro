@@ -1,7 +1,7 @@
 # dsh-subagent-codex-pro
 
 
-**0.9.0 未发布源码候选：**公开 machine API 新增可等待的结构化检查点、私有调用
+**0.9.0：**公开 machine API 新增可等待的结构化检查点、私有调用
 journal 与只读恢复。独立 supervisor 在调用者死亡后继续清理并保存原始终态回执。
 详见[生命周期与恢复](machine-lifecycle.zh.md)；没有因此发布 npm 或改动已有安装。
 

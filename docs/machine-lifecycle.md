@@ -1,6 +1,6 @@
 # Typed lifecycle and read-only recovery (lifecycle 1)
 
-This contract is in the **0.9.0 unreleased source candidate**. The public
+This contract is in **0.9.0**. The public
 `dsh-subagent-codex-pro/machine` result protocol stays 1. Lifecycle is a separate,
 versioned JavaScript API capability; the single-document CLI and existing DSH
 Host/tool results do not silently become a duplex protocol.

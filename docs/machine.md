@@ -4,7 +4,7 @@ Version 0.8.0 introduced a public entry for orchestrators that need the complete
 without a DSH parent Agent. It uses the same app-server runner, configuration
 checks, usage tracker and process guardian as the DSH provider and tool.
 
-The **0.9.0 unreleased source candidate** adds [typed lifecycle and read-only
+**0.9.0** adds [typed lifecycle and read-only
 recovery](machine-lifecycle.md) ([中文](machine-lifecycle.zh.md)). The result protocol
 remains 1. The single-document CLI remains terminal-only; durable ACKs use the
 JavaScript API. Existing DSH callers do not opt into this additional supervisor.

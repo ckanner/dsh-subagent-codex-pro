@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0 (source candidate, unreleased)
+## 0.9.0 (2026-11-12)
 
 - Add lifecycle v1 with awaited configuration-checked thread-ready, dispatch-intent,
   dispatch-possible and turn-accepted checkpoints. A failed ACK cannot silently
