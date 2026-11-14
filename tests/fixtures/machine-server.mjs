@@ -2,6 +2,12 @@
 // A real process implementing only the app-server messages needed by contract tests.
 import { createInterface } from 'node:readline'
 import { appendFileSync, writeFileSync } from 'node:fs'
+const config = {}
+for (let i = 2; i < process.argv.length; i++) {
+  if (process.argv[i] !== '-c') continue
+  const entry = process.argv[++i], split = entry.indexOf('=')
+  config[entry.slice(0, split)] = JSON.parse(entry.slice(split + 1).replace(/([a-z_]+)\s*=/g, '"$1":'))
+}
 const mode = process.env.FAKE_MACHINE_MODE ?? 'success'
 if (process.env.FAKE_MACHINE_PROCESS_FILE) writeFileSync(process.env.FAKE_MACHINE_PROCESS_FILE,
   JSON.stringify({ pid: process.pid, processGroupId: process.ppid }))
@@ -17,6 +23,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (process.env.FAKE_MACHINE_CAPTURE) appendFileSync(process.env.FAKE_MACHINE_CAPTURE, JSON.stringify(message) + '\n')
   if (message.method === 'initialize') {
     if (mode !== 'startup-hang') reply(message.id, {})
+  } else if (message.method === 'config/read') {
+    reply(message.id, { config: mode === 'native-mismatch' ? { ...config, 'agents.enabled': !config['agents.enabled'] } : config })
   } else if (message.method === 'thread/start' || message.method === 'thread/resume') {
     const result = {
       thread: { id: p.threadId ?? 'machine-thread', ephemeral: p.ephemeral === true },
@@ -31,9 +39,20 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (mode === 'missing-model') delete result.model
     if (mode === 'wrong-ephemeral') result.thread.ephemeral = false
     if (mode === 'missing-ephemeral') delete result.thread.ephemeral
+    if (mode === 'native-child-early-root') notify('thread/started', { thread: { id: 'child-1', model: 'child-model',
+      source: { subAgent: { thread_spawn: { parent_thread_id: result.thread.id } } } } })
     reply(message.id, result)
-  } else if (message.method === 'turn/start') {
-    reply(message.id, { turn: { id: 'machine-turn' } })
+  } else if (message.method === 'turn/start' || message.method === 'review/start') {
+    reply(message.id, { turn: { id: 'machine-turn' }, reviewThreadId: p.threadId })
+    if (mode.startsWith('native-child')) {
+      notify('turn/started', { threadId: 'child-1', turn: { id: 'child-turn' } })
+      notify('thread/tokenUsage/updated', { threadId: 'child-1', turnId: 'child-turn', tokenUsage: { total: usage(50) } })
+      if (mode !== 'native-child-early-root') notify('item/completed', { threadId: p.threadId, turnId: 'machine-turn', item: { type: 'collabAgentToolCall', id: 'spawn-1', tool: 'spawnAgent', senderThreadId: p.threadId, receiverThreadIds: ['child-1'], model: 'child-model', agentsStates: { 'child-1': { status: 'running' } } } })
+      notify('thread/tokenUsage/updated', { threadId: 'child-1', turnId: 'child-turn', tokenUsage: { total: usage(50) } })
+      send({ id: 701, method: 'item/commandExecution/requestApproval', params: { threadId: 'child-1', turnId: 'child-turn', itemId: 'child-command' } })
+      if (mode === 'native-child-hang') continue
+      notify('turn/completed', { threadId: 'child-1', turn: { id: 'child-turn', status: 'completed' } })
+    }
     if (mode === 'declined') {
       send({ jsonrpc: '2.0', id: 700, method: 'item/commandExecution/requestApproval',
         params: { threadId: p.threadId, turnId: 'machine-turn', itemId: 'item-1',
@@ -49,7 +68,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         threadId: p.threadId, turnId: 'machine-turn', tokenUsage: { total: usage(-1) },
       })
       notify('item/completed', { threadId: p.threadId, turnId: 'machine-turn',
-        item: { type: 'agentMessage', phase: 'final_answer',
+        item: message.method === 'review/start' ? { type: 'exitedReviewMode', review: 'NATIVE_REVIEW_OK' } : { type: 'agentMessage', phase: 'final_answer',
           text: mode === 'large-final' ? '{"message":"' + 'X'.repeat(300_000) + '"}' : '{"message":"MACHINE_OK"}' } })
       notify('turn/completed', { threadId: p.threadId, turn: { id: 'machine-turn', status: 'completed' } })
     })

@@ -24,6 +24,8 @@ import { closeSync } from 'node:fs'
 
 const command = process.argv[2]
 const graceMs = Number(process.argv[3])
+let overrides: string[] = []
+try { const value: unknown = JSON.parse(process.argv[4] ?? '[]'); if (!Array.isArray(value) || value.some(x => typeof x !== 'string' || x.includes('\0'))) throw new Error(); overrides = value } catch { process.exit(1) }
 const posix = process.platform !== 'win32'
 
 type ShutdownReason = 'caller' | 'disconnect'
@@ -122,7 +124,7 @@ if (command === undefined || !Number.isSafeInteger(graceMs) || graceMs < 0 || gr
   delete env.NODE_CHANNEL_FD
   delete env.NODE_CHANNEL_SERIALIZATION_MODE
   try {
-    child = spawn(command, ['app-server', '--stdio'], {
+    child = spawn(command, [...overrides, 'app-server', '--stdio'], {
       cwd: process.cwd(), env, stdio: ['inherit', 'inherit', 'inherit'],
       detached: false, windowsHide: true,
     })

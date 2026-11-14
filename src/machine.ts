@@ -1,4 +1,7 @@
 /** Versioned, host-independent entry point for deterministic orchestrators. */
+import { parseNativeRequest, type NativeRequest, type NativeReceipt, type NativeEvent } from './native.ts'
+export { MACHINE_NATIVE_VERSION, MACHINE_NATIVE_CAPABILITIES } from './native.ts'
+export type { NativeRequest, NativeReceipt, NativeEvent } from './native.ts'
 import { isAbsolute } from 'node:path'
 import type { CodexRunFailure, CodexRunOutcome } from './run.ts'
 import { runMachineLocal } from './machine-local.ts'
@@ -26,12 +29,14 @@ export interface MachineRequest {
   readonly threadId?: string
   readonly images?: readonly string[]
   readonly outputSchema?: Record<string, unknown>
+  readonly native?: NativeRequest
 }
 
 export interface MachineOptions {
   readonly signal?: AbortSignal
   readonly env?: Readonly<Record<string, string>>
   readonly onProgress?: (text: string) => void
+  readonly onNativeEvent?: (event: NativeEvent) => void
   /** Returning resolves the caller's durable checkpoint ACK. Rejection stops dispatch. */
   readonly onLifecycle?: (event: MachineLifecycleEvent) => Promise<void> | void
   /** A NEW private directory; its canonical parent must already exist. Never reused. */
@@ -64,6 +69,7 @@ export interface MachineReceipt {
     readonly turnConfiguration: CodexRunFailure['turnConfiguration'] | null
     readonly cleanup: CodexRunFailure['cleanup'] | null
   } | null
+  readonly native?: NativeReceipt
   readonly costUSD: null
   readonly costStatus: 'unknown'
 }
@@ -75,7 +81,7 @@ export class MachineInputError extends Error {
 
 const INPUT_KEYS = new Set([
   'protocol', 'requestId', 'prompt', 'cwd', 'model', 'effort', 'permissionMode',
-  'command', 'timeoutMs', 'maxOutputBytes', 'threadMode', 'threadId', 'images', 'outputSchema',
+  'command', 'timeoutMs', 'maxOutputBytes', 'threadMode', 'threadId', 'images', 'outputSchema', 'native',
 ])
 
 function textField(input: Record<string, unknown>, key: string, optional = false): void {
@@ -92,7 +98,7 @@ export function parseMachineRequest(value: unknown): MachineRequest {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new MachineInputError('request must be a JSON object')
   }
-  const input = value as Record<string, unknown>
+  const input = { ...value } as Record<string, unknown>
   if (Object.keys(input).some((key) => !INPUT_KEYS.has(key))) throw new MachineInputError('request contains an unsupported field')
   if (input.protocol !== MACHINE_PROTOCOL_VERSION) throw new MachineInputError('unsupported machine protocol version')
   for (const key of ['requestId', 'prompt', 'cwd', 'model', 'effort']) textField(input, key)
@@ -127,6 +133,12 @@ export function parseMachineRequest(value: unknown): MachineRequest {
       throw new MachineInputError('outputSchema must be an object-rooted JSON Schema')
     }
   }
+  if (input.native !== undefined) {
+    try { input.native = parseNativeRequest(input.native) } catch (error) { throw new MachineInputError(error instanceof Error ? error.message : 'invalid native policy') }
+    const native = input.native as NativeRequest
+    if (native.review && native.agents?.enabled) throw new MachineInputError('native review disables collaboration internally; choose an independent query for an agent review')
+    if (native.review && (input.threadId !== undefined || input.images !== undefined || input.outputSchema !== undefined)) throw new MachineInputError('native review requires a fresh thread without images or outputSchema')
+  }
   return input as unknown as MachineRequest
 }
 
@@ -135,11 +147,12 @@ export async function runMachine(value: MachineRequest, options: MachineOptions 
   const request = parseMachineRequest(value)
   if (process.platform === 'win32') throw new MachineInputError('machine execution requires POSIX process-group supervision')
   if (options === null || typeof options !== 'object' || Array.isArray(options)
-    || Object.keys(options).some(key => !['signal', 'env', 'onProgress', 'onLifecycle', 'recoveryDirectory'].includes(key))) {
+    || Object.keys(options).some(key => !['signal', 'env', 'onProgress', 'onNativeEvent', 'onLifecycle', 'recoveryDirectory'].includes(key))) {
     throw new MachineInputError('machine options contain unsupported fields')
   }
   if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw new MachineInputError('signal must be an AbortSignal')
   if (options.onProgress !== undefined && typeof options.onProgress !== 'function') throw new MachineInputError('onProgress must be a function')
+  if (options.onNativeEvent !== undefined && typeof options.onNativeEvent !== 'function') throw new MachineInputError('onNativeEvent must be a function')
   if (options.env !== undefined && (options.env === null || typeof options.env !== 'object' || Array.isArray(options.env)
     || Object.values(options.env).some(value => value !== undefined && (typeof value !== 'string' || value.includes('\0'))))) {
     throw new MachineInputError('env must contain only string environment values')

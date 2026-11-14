@@ -52,7 +52,7 @@ npx --no-install codex-pro-machine --json < request.json > receipt.json
 The required fields are protocol, requestId, prompt, cwd, model, effort and
 permissionMode. Machine calls always name their model and permission explicitly.
 Optional fields are command, timeoutMs, maxOutputBytes, threadMode, threadId,
-images and outputSchema. Unknown fields fail before a process starts. The CLI
+images, outputSchema and native. See [native capabilities](native-capabilities.md) for versioned controls and evidence. Unknown fields fail before a process starts. The CLI
 limits the entire request to 1 MiB. The runner limits stdout and diagnostic bytes
 to 32 MiB by default; exceeding the configured positive maxOutputBytes stops the
 run and sets execution.truncated instead of accepting a partial answer.

@@ -72,6 +72,7 @@ async function execute(request: MachineRequest, options: MachineHostOptions): Pr
     }
     const receipt = await runMachineLocal(request, {
       signal: abort.signal, env: options.env as Readonly<Record<string, string>>, onLifecycle,
+      onNativeEvent: event => { void send({ type: 'native-event', event }) },
       onProgress: text => { void send({ type: 'progress', text: text.slice(0, 16_384) }) },
     }, runId!, value => { journal?.receipt(value) })
     await send({ type: 'result', receipt })
