@@ -198,7 +198,11 @@ export class NativeTracker {
     }
     const child = typeof params.threadId === 'string' ? this.#children.get(params.threadId) : undefined
     if (!child) {
-      if (params.threadId !== this.#root && (['thread/tokenUsage/updated', 'turn/started', 'turn/completed'].includes(method) || (method === 'thread/started' && object(params.thread) && params.thread.id !== this.#root))) {
+      // thread/started carries its identity inside `thread`, even before the
+      // root/start response establishes our owner. Keep that bounded ancestry
+      // evidence so later child requests can be routed to the correct turn.
+      const id = method === 'thread/started' && object(params.thread) ? params.thread.id : params.threadId
+      if (text(id) && id !== this.#root && ['thread/tokenUsage/updated', 'turn/started', 'turn/completed', 'thread/started'].includes(method)) {
         if (this.#orphans.length < 128) this.#orphans.push({ method, params })
         else this.#truncated = true
       }
@@ -239,10 +243,16 @@ export class NativeTracker {
   }
   report(cleanupConfirmed = false): NativeReceipt {
     const usage: Record<string, CodexUsageReport> = {}
-    for (const [id, tracker] of this.#usage) usage[id] = tracker.report()
+    for (const [id, tracker] of this.#usage) {
+      const report = tracker.report()
+      // A cumulative snapshot is attributable, but without a terminal child
+      // event it is only a lower bound. Reaping processes cannot fill that gap.
+      usage[id] = report.status === 'complete' && !terminalStates.has(this.#children.get(id)!.state)
+        ? { ...report, status: 'partial', reason: 'child terminal consumption was not observed' } : report
+    }
     const children = [...this.#children.values()].map(c => ({ ...c, usage: usage[c.id] ?? null }))
     const pending = children.filter(c => !terminalStates.has(c.state)).map(c => c.id)
-    const complete = !this.#truncated && children.every(c => c.usage?.status === 'complete')
+    const complete = pending.length === 0 && !this.#truncated && children.every(c => c.usage?.status === 'complete')
     const total = complete ? children.reduce((sum, c) => sum + (c.usage?.run?.totalTokens ?? 0), 0) : null
     return { version: 1, requested: this.request, effective: this.#effective,
       observed: { events: [...this.#events], truncated: this.#truncated }, children,

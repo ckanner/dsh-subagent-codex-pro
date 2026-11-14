@@ -104,14 +104,19 @@ Only native parent relations, collaboration items and sub-agent activity items
 establish ownership. Foreign-thread text/usage cannot become a child result or
 root completion. Child approval requests are handled by the same unattended
 approval policy, and only for a known child turn. Unknown requests do not receive
-an expanded permission grant.
+an expanded permission grant. A child `thread/started` received before the root
+response is buffered with its nested thread identity; its ancestry is replayed
+after the root becomes known before routing later child requests.
 
 `native.usage.strategy` is `per-thread`, and its `scope` is `observed-children`.
 `totalTokens` covers those children only; root usage remains in `outcome.usage`.
 Counters are cumulative snapshots, not increments. Duplicate snapshots do not
 increase spend; a resumed child adopts a historical baseline. Unknown baselines,
 counter anomalies, missing observations or a truncated ledger make aggregation
-partial/unknown. No observed children is unknown, not fabricated zero. The host
+partial/unknown. An unfinished child's last attributable snapshot remains
+partial, including after physical cleanup; the snapshot is retained while the
+complete aggregate total stays absent. No observed children is unknown, not
+fabricated zero. The host
 must not add a child snapshot more than once or confuse complete observed-child
 usage with proof that all possible external spend was measured.
 

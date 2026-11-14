@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,7 +8,7 @@ import { runMachine, parseMachineRequest, type NativeEvent } from '../src/machin
 import { NativeTracker, nativeArguments, parseNativeRequest } from '../src/native.ts'
 
 function fixture(t: { after(fn: () => void): void }) {
-  const cwd = mkdtempSync(join(tmpdir(), 'codex-native-'))
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'codex-native-')))
   t.after(() => rmSync(cwd, { recursive: true, force: true }))
   const command = join(cwd, 'codex.mjs')
   copyFileSync(fileURLToPath(new URL('./fixtures/machine-server.mjs', import.meta.url)), command)
@@ -65,12 +65,65 @@ test('resume observations never attribute historical child totals to this invoca
   tracker.observe('thread/tokenUsage/updated', { threadId: 'child', turnId: 'old', tokenUsage: { total: total(1000) } })
   tracker.observe('turn/started', { threadId: 'child', turn: { id: 'new' } })
   for (const n of [1020, 1040, 1040]) tracker.observe('thread/tokenUsage/updated', { threadId: 'child', turnId: 'new', tokenUsage: { total: total(n) } })
-  assert.equal(tracker.report().usage.totalTokens, 40)
+  assert.equal(tracker.report().usage.children.child?.run?.totalTokens, 40)
+  assert.equal(tracker.report().usage.totalTokens, null)
   tracker.observe('turn/started', { threadId: 'child', turn: { id: 'second' } })
   tracker.observe('thread/tokenUsage/updated', { threadId: 'child', turnId: 'second', tokenUsage: { total: total(1060) } })
+  assert.equal(tracker.report().usage.children.child?.run?.totalTokens, 60)
+  tracker.observe('turn/completed', { threadId: 'child', turn: { id: 'second', status: 'completed' } })
   assert.equal(tracker.report().usage.totalTokens, 60)
   tracker.observe('thread/tokenUsage/updated', { threadId: 'stranger', turnId: 'bad', tokenUsage: { total: total(10000) } })
   assert.equal(tracker.report().children.length, 1)
+})
+
+test('child thread ancestry received before the root response survives bounded orphan replay', () => {
+  const tracker = new NativeTracker(parseNativeRequest({ version: 1, agents: { enabled: true } }))
+  tracker.observe('thread/started', { thread: { id: 'grandchild', source: { subAgent: { thread_spawn: { parent_thread_id: 'child' } } } } })
+  tracker.observe('thread/started', { thread: { id: 'child', source: { subAgent: { thread_spawn: { parent_thread_id: 'root' } } } } })
+  tracker.observe('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+  tracker.observe('turn/started', { threadId: 'grandchild', turn: { id: 'grandchild-turn' } })
+  tracker.observe('thread/started', { thread: { id: 'stranger', parentThreadId: 'foreign' } })
+  assert.equal(tracker.owns('child'), false)
+  tracker.setRoot('root')
+  assert.equal(tracker.owns('child'), true)
+  assert.equal(tracker.owns('grandchild'), true)
+  assert.equal(tracker.owns('stranger'), false)
+  assert.equal(tracker.acceptsTurn('child', 'child-turn'), true)
+  assert.equal(tracker.acceptsTurn('grandchild', 'grandchild-turn'), true)
+  assert.equal(tracker.report().children.length, 2)
+})
+
+test('unfinished native child snapshots remain partial after physical cleanup', () => {
+  const tracker = new NativeTracker(parseNativeRequest({ version: 1, agents: { enabled: true } }))
+  tracker.setRoot('root')
+  tracker.observe('item/completed', { threadId: 'root', item: { type: 'collabAgentToolCall', tool: 'spawnAgent', receiverThreadIds: ['child'] } })
+  tracker.observe('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+  tracker.observe('thread/tokenUsage/updated', { threadId: 'child', turnId: 'child-turn', tokenUsage: { total: total(50) } })
+  const interrupted = tracker.report(true)
+  assert.equal(interrupted.cleanup.confirmed, true)
+  assert.equal(interrupted.completion.confirmed, false)
+  assert.equal(interrupted.children[0]?.usage?.status, 'partial')
+  assert.equal(interrupted.usage.children.child?.status, 'partial')
+  assert.equal(interrupted.usage.children.child?.run?.totalTokens, 50)
+  assert.equal(interrupted.usage.status, 'partial')
+  assert.equal(interrupted.usage.totalTokens, null)
+  tracker.observe('turn/completed', { threadId: 'child', turn: { id: 'child-turn', status: 'completed' } })
+  assert.equal(tracker.report().usage.status, 'complete')
+  assert.equal(tracker.report().usage.totalTokens, 50)
+})
+
+test('native child started before the root response retains approval ownership through real transport', async t => {
+  const input = fixture(t), capture = join(input.cwd, 'capture')
+  const receipt = await runMachine({ ...input, native: { version: 1, agents: { enabled: true } } }, {
+    env: { FAKE_MACHINE_MODE: 'native-child-early-root', FAKE_MACHINE_CAPTURE: capture },
+  })
+  assert.equal(receipt.ok, true, JSON.stringify(receipt))
+  assert.equal(receipt.native?.children.length, 1)
+  assert.equal(receipt.native?.children[0]?.parentId, 'machine-thread')
+  assert.equal(receipt.native?.children[0]?.state, 'completed')
+  assert.equal(receipt.native?.children[0]?.model, 'child-model')
+  const messages = readFileSync(capture, 'utf8').trim().split('\n').map(JSON.parse)
+  assert.equal(messages.find(m => m.id === 701)?.result?.decision, 'decline')
 })
 
 test('native review uses a fresh verified thread and the dedicated review endpoint', async t => {
