@@ -10,7 +10,7 @@ window.__ModuleLoader__.load({
       limit: '最多并行子线程（留空使用 CLI 默认）', model: '子 Agent 默认模型（可选）', effort: '子 Agent 默认思考等级（可选）',
       backend: '使用 v2 Agent 后端', save: '保存', reload: '重新载入', saving: '保存中…', saved: '已保存；下一次调用使用新设置。',
       conflict: '未保存：配置可能已更新或不可写。草稿已保留；重新载入后再编辑。', unavailable: '当前配置不可用或不可写。',
-      invalidLimit: '并行数必须是大于零且小于 Number.MAX_SAFE_INTEGER 的整数。', effective: '当前生效的 native 配置',
+      invalidLimit: '并行数必须是大于零且小于 Number.MAX_SAFE_INTEGER 的整数。', invalidText: '子模型和思考等级不能包含 NUL，且 UTF-8 长度不能超过 65536 字节。', effective: '当前生效的 native 配置',
       note: '每次调用可整体覆盖默认值。关闭或继承不会保存下面的 Agent 参数；独立 review 使用 subagent_codex_review 工具。模型选择关闭时，调用者不得改变配置中的子模型与思考等级。',
       summary: '原生 Agent 默认配置与并行能力。',
     } : {
@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
       limit: 'Maximum concurrent child threads (blank: CLI default)', model: 'Default child model (optional)', effort: 'Default child effort (optional)',
       backend: 'Use the v2 Agent backend', save: 'Save', reload: 'Reload', saving: 'Saving…', saved: 'Saved. New settings apply to the next invocation.',
       conflict: 'Not saved: configuration changed or is not writable. Your draft is retained; reload before editing again.', unavailable: 'Configuration is unavailable or read-only.',
-      invalidLimit: 'Concurrency must be a positive integer below Number.MAX_SAFE_INTEGER.', effective: 'Currently effective native configuration',
+      invalidLimit: 'Concurrency must be a positive integer below Number.MAX_SAFE_INTEGER.', invalidText: 'Child model and effort cannot contain NUL or exceed 65536 UTF-8 bytes.', effective: 'Currently effective native configuration',
       note: 'An invocation can replace these defaults as a whole. Off and inherit do not save Agent fields. Independent review uses subagent_codex_review. With model selection disabled, callers cannot change the configured child model or effort.',
       summary: 'Native Agent defaults and concurrency.',
     }
@@ -41,8 +41,10 @@ window.__ModuleLoader__.load({
         if (!Number.isSafeInteger(n) || n < 1 || n >= Number.MAX_SAFE_INTEGER) throw new Error(copy.invalidLimit)
         agents.maxConcurrentThreads = n
       }
-      if (draft.model.trim() !== '') agents.defaultModel = draft.model.trim()
-      if (draft.effort.trim() !== '') agents.defaultEffort = draft.effort.trim()
+      for (const [field, value] of [['defaultModel', draft.model.trim()], ['defaultEffort', draft.effort.trim()]]) {
+        if (value.includes('\0') || new TextEncoder().encode(value).byteLength > 65536) throw new Error(copy.invalidText)
+        if (value !== '') agents[field] = value
+      }
       if (draft.backend) agents.backend = 'v2'
       return [{ op: 'set', path: ['native'], value: { version: 1, agents } }]
     }

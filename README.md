@@ -14,16 +14,65 @@ tools.subagent_codex({
 })
 ```
 
-## Native machine capabilities
+## Native capabilities in DSH and the machine API
 
-The 0.10.0 source candidate adds native agents, owned child events, independent native review and explicit off controls to protocol 1. See [the native capability contract](docs/native-capabilities.md). Existing requests and desktop PTC behavior remain compatible.
+The 0.10.0 source candidate exposes native agents in the **plugin itself**:
+open the installed bundle in DSH's Plugins page and configure its **codex-pro**
+row. The page offers inheritance, explicit off, concurrency, child model/effort,
+and the V2 backend. Saving applies to the next invocation without remounting the
+plugin; an active run keeps its original snapshot. A conflicting save retains
+your draft until you explicitly reload.
+
+`subagent_codex` accepts a per-call `native` value. DSH's existing PTC executor
+automatically generates this tool's SDK; native Codex agents still use Codex's
+own harness and tools. There is no separate PTC executor to install.
+
+```js
+await tools.subagent_codex({
+  description: "Implement independent changes",
+  prompt: "Implement the task; delegate independent work when useful.",
+  native: { version: 1, agents: { enabled: true, maxConcurrentThreads: 3, backend: "v2" } },
+})
+await tools.subagent_codex_review({
+  description: "Review the branch",
+  target: { type: "baseBranch", branch: "main" },
+})
+```
+
+| Desktop native value | Meaning |
+| --- | --- |
+| Omitted | Read the current plugin default; if none is configured, leave the choice to the CLI. |
+| `null` | Explicitly turn agents off across both backends. |
+| A version-1 object | Replace the entire native default, without merging nested fields. |
+| `{version:1, agents:{enabled:false}}` | Explicit off; active controls beside `enabled:false` are rejected. |
+
+A present object without `agents` also turns agents off. An enabled override
+under `modelSelection:false` must preserve exactly the configured child model
+and effort, including whether they are omitted. Inherited settings are allowed;
+changing or clearing those model choices requires editing the plugin settings.
+Native controls never expand the configured permission policy.
+
+Native review is a **separate, explicitly requested operation**:
+`subagent_codex_review` always creates a fresh ephemeral read-only thread with
+agents off. It accepts an explicit target and never accepts an ignored prompt,
+resume id, image list or output schema. Normal delegation defaults cannot select
+review.
+
+Direct tool results keep full evidence in `native` alongside clean `content`.
+Background jobs with native evidence return a JSON string envelope containing
+`text`, `threadId` and `native`; jobs without native controls keep their
+existing text result. The Host provider reads the same live defaults and reports
+bounded native diagnostics through the official Host contract. The standalone
+machine API retains its full receipt and recovery journal. See the
+[complete contract](docs/native-capabilities.md) / [中文契约](docs/native-capabilities.zh.md)
+for settings, per-call policy, provider boundaries, evidence and verification.
 
 ## 0.9.0: durable lifecycle and recovery
 
 The public machine API now exposes awaitable typed checkpoints, a private
 per-invocation journal, and read-only recovery. An independent machine supervisor
-preserves the original terminal receipt after caller death. This release
-is **not an npm release**. See the [lifecycle contract](docs/machine-lifecycle.md)
+preserves the original terminal receipt after caller death. Version 0.10.0 remains
+an unpublished source candidate. See the [lifecycle contract](docs/machine-lifecycle.md)
 and [中文说明](docs/machine-lifecycle.zh.md); existing DSH tool behavior is unchanged.
 
 ## 0.8.0 integration and migration

@@ -92,15 +92,15 @@ export const desktopNativeSchema: Record<string, unknown> = {
   description: 'Omit to use the plugin native default (or CLI defaults when none is configured). null explicitly turns agents off. '
     + 'An object replaces the complete native default; no nested fields are merged. Review uses subagent_codex_review. '
     + 'When modelSelection is disabled, an enabled override must retain exactly the configured child model and effort.',
-  anyOf: [
+  oneOf: [
     { type: 'null' },
     { type: 'object', additionalProperties: false, required: ['version'], properties: {
       version: { type: 'integer', const: 1 },
       agents: { type: 'object', additionalProperties: false, required: ['enabled'], properties: {
         enabled: { type: 'boolean' },
-        maxConcurrentThreads: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER - 1 },
-        defaultModel: { type: 'string', minLength: 1 },
-        defaultEffort: { type: 'string', minLength: 1 },
+        maxConcurrentThreads: { type: 'integer', description: 'Positive safe integer below Number.MAX_SAFE_INTEGER; checked before dispatch.' },
+        defaultModel: { type: 'string', description: 'Non-empty text; checked before dispatch.' },
+        defaultEffort: { type: 'string', description: 'Non-empty text; checked before dispatch.' },
         backend: { type: 'string', const: 'v2' },
       } },
     } },
@@ -113,10 +113,10 @@ export const reviewTargetSchema: Record<string, unknown> = {
     { type: 'object', additionalProperties: false, required: ['type'],
       properties: { type: { const: 'uncommittedChanges', type: 'string' } } },
     { type: 'object', additionalProperties: false, required: ['type', 'branch'],
-      properties: { type: { const: 'baseBranch', type: 'string' }, branch: { type: 'string', minLength: 1 } } },
+      properties: { type: { const: 'baseBranch', type: 'string' }, branch: { type: 'string', description: 'Non-empty text; checked before dispatch.' } } },
     { type: 'object', additionalProperties: false, required: ['type', 'sha'],
-      properties: { type: { const: 'commit', type: 'string' }, sha: { type: 'string', minLength: 1 }, title: { type: 'string', minLength: 1 } } },
+      properties: { type: { const: 'commit', type: 'string' }, sha: { type: 'string', description: 'Non-empty text; checked before dispatch.' }, title: { type: 'string', description: 'Non-empty text; checked before dispatch.' } } },
     { type: 'object', additionalProperties: false, required: ['type', 'instructions'],
-      properties: { type: { const: 'custom', type: 'string' }, instructions: { type: 'string', minLength: 1 } } },
+      properties: { type: { const: 'custom', type: 'string' }, instructions: { type: 'string', description: 'Non-empty text; checked before dispatch.' } } },
   ],
 }

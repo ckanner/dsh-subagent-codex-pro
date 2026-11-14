@@ -3,7 +3,7 @@
 
 **0.9.0：**公开 machine API 新增可等待的结构化检查点、私有调用
 journal 与只读恢复。独立 supervisor 在调用者死亡后继续清理并保存原始终态回执。
-详见[生命周期与恢复](machine-lifecycle.zh.md)；没有因此发布 npm 或改动已有安装。
+详见[生命周期与恢复](machine-lifecycle.zh.md)；本次 0.10.0 仍是未发布的源码候选。
 
 [English](../README.md) | 中文
 
@@ -18,9 +18,52 @@ tools.subagent_codex({
 })
 ```
 
-## 0.10.0 原生机器能力
+## 0.10.0：插件设置、PTC 工具与原生能力
 
-公开 machine API 新增 Codex 原生多 Agent、逐子线程事件与用量、独立新线程原生 Review，以及显式关闭控制。子 Agent 继续使用原生工具和已配置权限，取消后核对实际进程清理；恢复只读已有回执，不自动重跑。详见[完整能力契约](native-capabilities.md)。本次为源码候选，未发布 npm，也不代表用户 Mac 或真实模型已验收。
+原生能力已经接入**插件本身**。在 DSH「插件」中打开已安装的 bundle，配置
+**codex-pro** 这一行，即可选择继承、显式全部关闭、并发子线程上限、子模型、
+子 Agent 思考等级与 V2 后端。保存后下一次调用读取新设置；正在运行的任务
+保持原来的快照。遇到配置版本冲突，页面保留草稿，只有显式重新载入才放弃编辑。
+
+普通 `subagent_codex` 工具新增单次 `native` 参数，DSH 的 PTC 自动生成其工具
+SDK，不需要另外实现 PTC executor。外层用 PTC 编排，内层仍由 Codex 原生
+harness 执行原生工具与子 Agent。
+
+```js
+await tools.subagent_codex({
+  description: "实现独立模块",
+  prompt: "完成任务；合适时将独立工作交给原生子 Agent。",
+  native: { version: 1, agents: { enabled: true, maxConcurrentThreads: 3, backend: "v2" } },
+})
+await tools.subagent_codex_review({
+  description: "审查当前分支",
+  target: { type: "baseBranch", branch: "main" },
+})
+```
+
+| 单次 native 值 | 语义 |
+| --- | --- |
+| 省略 | 使用调用开始时的插件默认值；插件也未设置时保留 CLI 自己的默认行为。 |
+| `null` | 显式关闭两个 Agent 后端，不是退回 CLI 默认。 |
+| version 1 对象 | 整体替换插件默认值，不逐字段合并。 |
+| `{version:1,agents:{enabled:false}}` | 显式关闭；并发、子模型、effort、backend 等残留字段会报错。 |
+
+`modelSelection:false` 不会禁用用户配置中的子模型默认值，但单次 enabled 对象
+必须保留相同的子模型与 effort，包括字段是否省略；改变或清空选择需用户修改设置。
+`native` 不能扩大插件配置的文件与进程权限。
+
+独立原生 Review 使用专用 `subagent_codex_review`：每次显式 target、新的临时
+线程、read-only、agents off，不接收会被忽略的 prompt、thread_id、图片或
+output_schema。不能将 review 设成普通委派的默认任务。
+
+前台工具结果以独立 `native` 字段保留完整回执，`content` 中的结构化答案不混入
+调试文字。带 native 回执的后台 job 返回 JSON 字符串信封
+`{text,threadId,native}`；未启用显式 native 控制时保留原来的纯文本结果。
+Host provider 使用同一动态默认值，并通过官方 diagnostic 记录有界摘要。
+machine API 继续提供完整回执、逐子线程事件与用量，以及只读恢复。
+详见[中文完整契约](native-capabilities.zh.md) / [English contract](native-capabilities.md)。
+本次仍是 0.10.0 源码候选，未发布 npm；离线协议与组件测试不等于用户 Mac
+或真实付费模型已验收。
 
 ## 0.8.0 正式机器入口与迁移
 

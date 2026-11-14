@@ -421,13 +421,13 @@ export class CodexExecProvider implements SubagentProviderLike {
       throw new Error('codex-pro: the parent session has no working directory to delegate from')
     }
     const requestFields = ['prompt', 'parent', 'signal', 'cwd', 'agentOptions', 'outputSchema', 'label', 'agentPreset', 'maxDepth']
-    const unknown = Object.keys(request).find(key => !requestFields.includes(key))
+    const unknown = Object.entries(request).find(([key, value]) => value !== undefined && !requestFields.includes(key))?.[0]
     if (unknown !== undefined) throw new Error('codex-pro: unsupported Host start field: ' + unknown)
     if ('agentPreset' in request && request.agentPreset !== undefined || 'maxDepth' in request && request.maxDepth !== undefined) {
       throw new Error('codex-pro: agentPreset and maxDepth are not supported by this Codex backend')
     }
     const options = request.agentOptions
-    if (options !== undefined && Object.keys(options).some(key => !['provider', 'model', 'reasoningEffort', 'maxTokens'].includes(key))) {
+    if (options !== undefined && Object.entries(options).some(([key, value]) => value !== undefined && !['provider', 'model', 'reasoningEffort', 'maxTokens'].includes(key))) {
       throw new Error('codex-pro: unsupported agentOptions field; native controls belong in plugin settings or subagent_codex.native')
     }
     // Host AgentOptions are not Codex configuration. Unsupported fields must

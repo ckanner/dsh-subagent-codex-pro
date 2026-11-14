@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, Config, CodexExecProvider, type Config as PluginConfig } from '../src/index.ts'
 import { readNativeDefault } from '../src/desktop-native.ts'
+import z from '@deepseek-ai/schemastery'
+import { assertObjectJsonSchema, assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinitionLike, JobSpecLike } from '../src/dsh-types.ts'
 
 const signal = () => new AbortController().signal
@@ -23,7 +25,10 @@ function harness(t: { after(fn: () => void): void }, extra: PluginConfig = {}, m
   const jobs: ReturnType<JobSpecLike['run']>[] = []
   let provider: CodexExecProvider
   const agent = { id: 'desktop-agent', session: { header: { cwd, agentPreset: 'test' } },
-    ctx: { tools: { register(tool: ToolDefinitionLike) { registered.set(tool.name, tool); return () => {} } },
+    ctx: { tools: { register(tool: ToolDefinitionLike) {
+      assertObjectJsonSchema(tool.parameters); assertSupportedJsonSchema(tool.output.schema)
+      registered.set(tool.name, tool); return () => {}
+    } },
       systemPrompt: { section() { return () => {} } } } }
   const context = {
     get(name: string) {
@@ -44,18 +49,34 @@ function harness(t: { after(fn: () => void): void }, extra: PluginConfig = {}, m
   assert.ok(registered.has('subagent_codex_review'))
   const messages = () => existsSync(capture)
     ? readFileSync(capture, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
-  const call = (args: object = {}, name = 'subagent_codex') =>
-    registered.get(name)!.execute({ description: 'fixture task', ...(name === 'subagent_codex' ? { prompt: 'Return the fixture answer.' } : {}), ...args }, { signal: signal() }) as Promise<any>
+  const call = async (args: object = {}, name = 'subagent_codex'): Promise<any> => {
+    const tool = registered.get(name)!
+    const result = await tool.execute({ description: 'fixture task', ...(name === 'subagent_codex' ? { prompt: 'Return the fixture answer.' } : {}), ...args }, { signal: signal() })
+    assert.deepEqual(validateJsonSchemaValue(tool.output.schema, result), [])
+    return result
+  }
   return { cwd, agent, registered, provider: provider!, jobs, messages, call }
 }
 
-test('real Config schema preserves absent/null inheritance and rejects unknown native controls at invocation', () => {
+test('real Config schema preserves absent/null inheritance and rejects invalid native settings before save', () => {
   const omitted = Config({})
   assert.equal(typeof omitted.native.get, 'function')
   assert.equal(readNativeDefault(omitted.native), undefined)
   assert.deepEqual(readNativeDefault(Config({ native: null }).native), { version: 1, agents: { enabled: false } })
   assert.deepEqual(readNativeDefault(Config({ native: enabled }).native), enabled)
-  assert.throws(() => readNativeDefault(Config({ native: { version: 1, unknownSwitch: true } }).native), /fields/)
+  for (const schema of [Config, new z(JSON.parse(JSON.stringify(Config)))]) {
+    assert.equal(schema({}).native.get(), undefined)
+    assert.equal(schema({ native: null }).native.get(), null)
+    for (const native of [
+      { version: 1, unknownSwitch: true }, { version: 1, agents: { enabled: true, extra: undefined } },
+      { version: 1, agents: { enabled: false, defaultModel: 'residual' } },
+      { version: 1, agents: { enabled: true, defaultModel: '' } },
+      { version: 1, agents: { enabled: true, defaultEffort: '\\0' } },
+      { version: 1, agents: { enabled: true, defaultModel: 'x'.repeat(65537) } },
+      { version: 1, agents: { enabled: true, maxConcurrentThreads: Number.MAX_SAFE_INTEGER } },
+      { version: 1, review: { target: { type: 'uncommittedChanges' } } },
+    ]) assert.throws(() => schema({ native }))
+  }
   assert.throws(() => readNativeDefault({ version: 1, review: { target: { type: 'uncommittedChanges' } } }), /subagent_codex_review/)
 })
 
@@ -130,11 +151,14 @@ test('unknown fields, disabled residuals and permission widening fail before a p
 test('Host provider uses the same live defaults and refuses invented provider options', async t => {
   let setting: any = enabled
   const h = harness(t, { native: { get: () => setting } }, 'native-child')
-  const request = { parent: h.agent as never, prompt: [{ type: 'text', text: 'fixture' }], cwd: h.cwd, signal: signal() }
+  // Exactly the latest Host request surface, including legal explicitly undefined optional fields.
+  const request = { parent: h.agent as never, prompt: [{ type: 'text', text: 'fixture' }], cwd: h.cwd, signal: signal(),
+    label: undefined, agentPreset: undefined, maxDepth: undefined, outputSchema: undefined,
+    agentOptions: { provider: undefined, model: undefined, reasoningEffort: undefined, maxTokens: undefined } }
   const first = await h.provider.start(request)
   const outcome = await first.result
   assert.equal(outcome.stopReason, 'completed')
-  const summary = JSON.parse(outcome.diagnostic!).native
+  const summary = JSON.parse(outcome.diagnostic!.slice(outcome.diagnostic!.indexOf('{"native":'))).native
   assert.equal(summary.effectiveMatched, true)
   assert.equal(summary.completion.confirmed, true)
   assert.equal(summary.children.count, 1)
