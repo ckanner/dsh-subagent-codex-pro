@@ -1,10 +1,9 @@
 /**
  * The harness shapes this probe needs, declared locally.
  *
- * The plugin imports nothing from `@deepseek-ai/*` at runtime — that is a
- * deliberate property, so a failure can only mean the wiring and never module
- * resolution. These are structural types mirroring the harness contracts; they
- * are erased at build time.
+ * These structural types mirror the harness contracts and are erased at build
+ * time. Only the Host settings schema imports Schemastery at runtime; the
+ * supervised machine API remains independent of DSH services.
  *
  * The tool registration shape mirrors what the LCU plugin does, which is the
  * proven path for a plugin that registers its own model-facing tools.
@@ -93,7 +92,7 @@ export interface ToolDefinitionLike {
   readonly parameters: Record<string, unknown>
   readonly output: {
     readonly schema: Record<string, unknown>
-    render(args: unknown, value: unknown): readonly TextBlock[]
+    render(args: unknown, value: unknown): readonly (TextBlock | { readonly type: 'image'; readonly attachment: unknown })[]
   }
   execute(args: unknown, exec: { readonly signal: AbortSignal }): Promise<unknown>
 }

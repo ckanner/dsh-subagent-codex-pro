@@ -115,8 +115,8 @@ test('the tool exposes model and effort only while the host opts in', async () =
   const props = (tool: { parameters: Record<string, unknown> }): string[] =>
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
-  assert.deepEqual(props(off), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode'])
-  assert.deepEqual(props(on), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(off), ['native', 'description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode'])
+  assert.deepEqual(props(on), ['native', 'description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
   // The harness rejects a descriptor map: `parameters` must be a JSON Schema object.
   for (const tool of [off, on]) {
     assert.equal((tool.parameters as { type?: string }).type, 'object')
@@ -197,7 +197,7 @@ test('the tool forwards a per-call permission mode and rejects an unknown one', 
       { description: 'probe', prompt: 'go', permission_mode: 'read-everything' },
       { signal: new AbortController().signal },
     ),
-    /permission_mode must be one of/,
+    /permission_mode is invalid or exceeds/,
   )
 })
 
@@ -213,9 +213,9 @@ test('run_in_background appears only when the jobs service is present', async ()
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
   assert.deepEqual(props(createCodexTool({ ...base, backgroundEnabled: false })),
-    ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
+    ['native', 'description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
   assert.deepEqual(props(createCodexTool({ ...base, backgroundEnabled: true })),
-    ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort', 'run_in_background'])
+    ['native', 'description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort', 'run_in_background'])
 
   // Without background support the output is a plain answer, so the schema stays simple.
   const off = createCodexTool({ ...base, backgroundEnabled: false })
@@ -292,8 +292,8 @@ test('the tool declares and forwards the thread controls when enabled', async ()
     Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)
 
   // disabled: the schema is exactly what it was before this feature existed
-  assert.deepEqual(props(make(false)), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
-  assert.deepEqual(props(make(true)), ['description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
+  assert.deepEqual(props(make(false)), ['native', 'description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort'])
+  assert.deepEqual(props(make(true)), ['native', 'description', 'prompt', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode', 'model', 'reasoning_effort', 'thread_mode', 'thread_id'])
 
   const tool = make(true)
   await tool.execute(
@@ -302,13 +302,13 @@ test('the tool declares and forwards the thread controls when enabled', async ()
   )
   assert.deepEqual(seen, [{ threadMode: 'persistent', threadId: 'thread-1' }])
 
-  // An unknown mode is not forwarded as a mode; the runner falls back to config.
+  // Unknown modes must not silently change the caller's persistence choice.
   seen.length = 0
-  await tool.execute(
+  await assert.rejects(tool.execute(
     { description: 'probe', prompt: 'go', thread_mode: 'nonsense' },
     { signal: new AbortController().signal },
-  )
-  assert.deepEqual(seen, [{ threadMode: undefined, threadId: undefined }])
+  ), /thread_mode must be/)
+  assert.deepEqual(seen, [])
 })
 
 test('the tool describes the thread default it was configured with', async () => {
@@ -359,6 +359,7 @@ test('image blocks from the runner reach the tool result and its rendering', asy
   // is why the runner puts the image's location in the text as well.
   const rendered = tool.output.render({}, result) as { type: string, text: string }[]
   assert.equal(rendered[0]?.text, 'shot taken')
+  assert.deepEqual(rendered[1], { type: 'image', attachment: 'att-1' })
 })
 
 test('a text-only runner still returns a content block the schema admits', async () => {

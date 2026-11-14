@@ -1,7 +1,7 @@
 // Exercise exactly the built npm tarball through public exports and its installed bin.
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +27,10 @@ try {
   const install = join(temp, 'installed')
   mkdirSync(install)
   run(npm, ['install', '--prefix', install, '--ignore-scripts', '--no-audit', '--no-fund', join(temp, tarballs[0])])
+  assert.equal(existsSync(join(install, 'node_modules/@deepseek-ai/schemastery')), false,
+    'the standalone machine consumer must not install the optional desktop schema peer')
+  assert.ok(existsSync(join(install, 'node_modules/dsh-subagent-codex-pro/assets/native-client.js')),
+    'the desktop client must be shipped in the real tarball')
   const command = join(temp, 'fake-codex.mjs')
   copyFileSync(join(root, 'tests/fixtures/machine-server.mjs'), command)
   chmodSync(command, 0o755)

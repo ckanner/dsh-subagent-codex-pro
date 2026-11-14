@@ -3,7 +3,10 @@
 Protocol 1 keeps its existing behavior when `native` is absent. A caller can now
 opt into a versioned native policy. The adapter still starts the user's installed,
 logged-in Codex app-server; it does not create a new account, billing path, SDK
-client, or DSH session. These controls apply to the public `/machine` API and CLI.
+client, or DSH session. These controls apply to the public `/machine` API and CLI,
+and are now also connected to the DSH plugin settings and tools described below.
+
+English | [中文](native-capabilities.zh.md)
 
 ```js
 import { runMachine, MACHINE_NATIVE_CAPABILITIES } from 'dsh-subagent-codex-pro/machine'
@@ -30,6 +33,97 @@ const receipt = await runMachine({
   onNativeEvent: event => { /* bounded metadata for the host's activity view */ },
 })
 ```
+
+## Desktop settings and PTC tools
+
+Open the installed bundle's `codex-pro` row configuration in DSH's Plugins page.
+The shipped browser entry registers `plugins.row.config` using the Host's shared
+React module. It edits only the `native` path through the owner form's atomic
+`mutate(ops, expectedRevision)`, never a deep merge of stale enabled controls.
+“Inherit configuration” unsets that path; “All off” writes `null`. The effective
+value preview distinguishes inherited configuration from the editable override.
+Read-only/unavailable forms cannot save; conflicts retain the draft and its
+original revision until the user reloads.
+
+The plugin exports an actual Schemastery `Config`. Its `native` field is
+volatile and read once at each delegation's start, including the Host provider
+path. Omission has no empty-object default. Other plugin configuration keeps its
+existing remount semantics. YAML configuration remains available:
+
+```yaml
+native:
+  version: 1
+  agents:
+    enabled: true
+    maxConcurrentThreads: 3
+    defaultModel: your-worker-model
+    defaultEffort: high
+    backend: v2
+```
+
+`subagent_codex({description, prompt, native, ...})` is the same registered tool
+in ordinary DSH execution and in the automatically generated PTC tool SDK.
+Omitting `native` inherits the current plugin default; no plugin default leaves
+CLI-native defaults alone. A supplied object replaces that default completely.
+Desktop `native:null` is shorthand for
+`{version:1,agents:{enabled:false}}`; the public protocol-1 machine API still
+uses the versioned object and does not accept this desktop shorthand.
+
+A disabled policy may not carry enabled-only fields. Unknown native fields and
+unknown tool arguments are rejected even if a caller bypasses JSON Schema.
+When `modelSelection:false`, inherited child model/effort settings remain valid.
+An enabled per-call object must keep those two values exactly, including
+omission; replacing an object must not silently clear a configured model.
+Explicit off is still permitted. Native fields do not expand the root sandbox.
+
+An implicit `threadMode:session` resume is bound to native policy, model,
+effort, permission and cwd. A binding change starts a new thread. Explicit
+`thread_id` remains supported, including externally created threads: requested
+configuration is reapplied and checked on every resume; a failed explicit
+resume is reported, never silently replaced.
+
+The latest DSH Host `SubagentStartRequest` has model/effort `agentOptions`,
+but no generic provider-options or native field. Its provider path therefore
+uses this plugin's live native default, while per-call native changes use
+`subagent_codex` or `/machine`. Unknown Host start/options fields are rejected.
+This is not a second Host Agent tree: Codex's children retain their native
+lifecycle, permission, tool and usage semantics.
+
+## Desktop native review
+
+```js
+await tools.subagent_codex_review({
+  description: "Review branch changes",
+  target: { type: "baseBranch", branch: "main" },
+  // Optional when model selection is enabled:
+  model: "your-review-model",
+  reasoning_effort: "high",
+})
+```
+
+This dedicated tool accepts description, target, cwd, timeout, model/effort when
+authorized, and background execution when the jobs service exists. It fixes
+fresh ephemeral execution, read-only sandbox, approvals=never, and agents off.
+It does not accept prompt, native, thread controls, images or output_schema.
+Review is rejected in plugin defaults and ordinary tool native overrides, so a
+normal task cannot accidentally become review/start or lose its prompt.
+For an agent-assisted review or structured verdict, use an ordinary independent
+delegation with the appropriate prompt and schema.
+
+## Desktop evidence
+
+| Entry | Evidence and answer |
+| --- | --- |
+| Foreground / PTC tool | `{content,native}`; complete native receipt is separate from unchanged answer blocks. Rendering preserves image attachments and appends a bounded native metadata block. |
+| Background job | With native evidence, `result` is a JSON string `{text,threadId,native}`; without it, the previous plain text result remains. Failed jobs retain an available native receipt. |
+| Host provider | Official `output`/`structured` are unchanged. `diagnostic` and the plugin log retain bounded metadata: config match, completion/cleanup, pending counts and abbreviated ids, child state counts, usage scope/status and event truncation. |
+| Machine API | Complete native receipt and existing durable recovery journal. |
+
+The Host's narrow result contract is not extended with invented fields. Its
+bounded summary is not the complete event ledger; callers needing all child
+identities and events use the dedicated tools or machine API. An unconfirmed
+native configuration, unfinished observed child or unconfirmed process cleanup
+prevents a successful result, even when the root already emitted a final answer.
 
 ## Configuration and full agent access
 
@@ -133,13 +227,22 @@ resume. No automatic retry occurs after a possibly dispatched failure.
 
 ## Verification and primary references
 
-Offline tests exercise actual child processes for config mismatch before dispatch,
+The desktop follow-up is validated by GitHub Actions against the actual npm
+Schemastery package, registered plugin tools and real offline app-server child
+processes. React component tests exercise saving, whole-value off/reset,
+validation, read-only forms and revision conflicts. Package tests install the
+real tarball into a clean consumer without DSH peers and exercise its public
+machine API and installed CLI. Local execution was unavailable for this follow-up;
+these checks do not claim an installed desktop or authenticated model run.
+
+Earlier machine-capability offline tests exercise actual child processes for config mismatch before dispatch,
 early child events, child approvals, deduplicated/replayed usage, cancellation,
 fresh native review, supervisor delivery and the built installed npm package.
 The package remains a source candidate until separately published. This change
-does not claim an authenticated live-model/desktop acceptance run. A zero-model
-probe of the installed `codex-cli 0.167.0-alpha.4` could read CLI help but timed out
-at the configuration handshake in this environment; no model turn was sent.
+does not claim an authenticated live-model/desktop acceptance run. During the earlier machine-capability review, a zero-model probe of
+`codex-cli 0.167.0-alpha.4` could read CLI help but timed out at the configuration
+handshake. That historical probe is not a new desktop follow-up execution; no
+model turn was sent.
 
 Implementation contracts were checked against OpenAI's fixed source
 [`7924f95421a326bb66426a3ce232b72550948470`](https://github.com/openai/codex/tree/7924f95421a326bb66426a3ce232b72550948470):

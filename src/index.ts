@@ -50,9 +50,12 @@ import type {
   SubagentStartRequestLike,
 } from './dsh-types.ts'
 import { settleJob } from './jobs.ts'
-import { CodexRunFailure, DEFAULT_RUN_TIMEOUT_MS, chooseThread, delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
+import { CodexRunFailure, CodexDelegationFailure, DEFAULT_RUN_TIMEOUT_MS, chooseThread, delegateOnce, startCodexRun, type CodexRunSpec } from './run.ts'
 import { DEFAULT_ORIGINATOR } from './wire.ts'
-import { createCodexTool } from './tool.ts'
+import { createCodexTool, createCodexReviewTool, type CodexToolOptions } from './tool.ts'
+import { ConfigSchema } from './config.ts'
+import { readNativeDefault, resolveDesktopNative, nativeSessionKey, nativeDiagnostic, type DesktopNative, type NativeConfigValue } from './desktop-native.ts'
+import type { NativeReceipt, NativeRequest } from './native.ts'
 import type { CodexPermissionMode } from './wire.ts'
 
 /** Cordis plugin name. */
@@ -67,8 +70,13 @@ export const name = 'codex-pro'
  */
 export const inject = ['subagents']
 
+/** Runtime schema consumed by DSH's plugin settings service. */
+export const Config = ConfigSchema
+
 /** Plugin configuration. */
 export interface Config {
+  /** Live ordinary-delegation defaults. Omit for CLI defaults; null explicitly turns agents off. */
+  native?: NativeConfigValue
   /** Provider name to register under. Must differ from the official `codex`. */
   providerName?: string
   /** Codex executable; the app-server is started as `<command> app-server --stdio`. */
@@ -412,15 +420,30 @@ export class CodexExecProvider implements SubagentProviderLike {
     if (cwd === undefined) {
       throw new Error('codex-pro: the parent session has no working directory to delegate from')
     }
+    const requestFields = ['prompt', 'parent', 'signal', 'cwd', 'agentOptions', 'outputSchema', 'label', 'agentPreset', 'maxDepth']
+    const unknown = Object.entries(request).find(([key, value]) => value !== undefined && !requestFields.includes(key))?.[0]
+    if (unknown !== undefined) throw new Error('codex-pro: unsupported Host start field: ' + unknown)
+    if ('agentPreset' in request && request.agentPreset !== undefined || 'maxDepth' in request && request.maxDepth !== undefined) {
+      throw new Error('codex-pro: agentPreset and maxDepth are not supported by this Codex backend')
+    }
     const options = request.agentOptions
+    if (options !== undefined && Object.entries(options).some(([key, value]) => value !== undefined && !['provider', 'model', 'reasoningEffort', 'maxTokens'].includes(key))) {
+      throw new Error('codex-pro: unsupported agentOptions field; native controls belong in plugin settings or subagent_codex.native')
+    }
     // Host AgentOptions are not Codex configuration. Unsupported fields must
     // never disappear behind the coarse agentOptions capability flag.
     if (options?.provider !== undefined || options?.maxTokens !== undefined) {
       throw new Error('codex-pro: provider and maxTokens overrides are not supported by this Codex backend')
     }
+    if (this.resolved.modelSelection === false && (
+      options?.model !== undefined && options.model !== this.resolved.model
+      || options?.reasoningEffort !== undefined && options.reasoningEffort !== this.resolved.reasoningEffort
+    )) throw new Error('codex-pro: modelSelection is disabled; the Host call cannot override the configured model or effort')
     const model = options?.model ?? this.resolved.model
     const effort = options?.reasoningEffort ?? this.resolved.reasoningEffort
+    const native = readNativeDefault(this.resolved.native)
     const spec: CodexRunSpec = {
+      ...(native === undefined ? {} : { native }),
       cwd,
       command: this.resolved.command,
       permissionMode: this.resolved.permissionMode,
@@ -466,14 +489,17 @@ export class CodexExecProvider implements SubagentProviderLike {
           ...(failure === null ? [] : [`failure: ${failure.stage}/${failure.category}`
             + (failure.httpStatus === undefined ? '' : ` (HTTP ${String(failure.httpStatus)})`)]),
           ...(outcome.approvalDiagnostic === undefined ? [] : [outcome.approvalDiagnostic]),
-        ].join('; ').slice(0, 4096)
+        ].join('; ').slice(0, 1024)
+        const nativeSummary = outcome.native === undefined ? '' : nativeDiagnostic(outcome.native)
+        const resultDiagnostic = [Buffer.from(diagnostic).subarray(0, 1024).toString('utf8'), nativeSummary].filter(Boolean).join('; ')
+        if (nativeSummary !== '') diag('provider native: ' + nativeSummary)
         return {
           output: outcome.output,
           // The harness's own vocabulary has no `timeout`; its `aborted` is what
           // a cancelled run is, and the diagnostic carries the reason either way.
           stopReason: outcome.stopReason === 'timeout' ? 'aborted' : outcome.stopReason,
           ...(outcome.structured === undefined ? {} : { structured: outcome.structured }),
-          ...(diagnostic === '' ? {} : { diagnostic }),
+          ...(resultDiagnostic === '' ? {} : { diagnostic: resultDiagnostic }),
         }
       }),
       // Host dispose returns void on success, but rejects when teardown cannot
@@ -504,7 +530,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     ...(config.model === undefined ? {} : { model: config.model }),
     ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
     ...(config.env === undefined ? {} : { env: config.env }),
+    ...(config.native === undefined ? {} : { native: config.native }),
   }
+  // Validate the first snapshot without freezing it; every run reads the live reference again.
+  readNativeDefault(resolved.native)
   const presets = config.presets ?? ['codexprobe']
 
   try {
@@ -673,7 +702,7 @@ export function apply(ctx: Context, config: Config = {}): void {
      * thread it opened; it is deliberately per-Agent rather than global, because
      * two sessions delegating at once must not continue each other's work.
      */
-    const sessionThread = new Map<string, string>()
+    const sessionThread = new Map<string, { id: string; binding: string }>()
 
     /**
      * Threads this Agent is delegating in right now.
@@ -686,6 +715,8 @@ export function apply(ctx: Context, config: Config = {}): void {
 
     /** One call's resolved thread decision. */
     interface CallLike {
+      readonly native?: DesktopNative
+      readonly review?: NativeRequest['review']
       /** The model's short description, used as the thread name's label. */
       readonly label: string
       readonly prompt: string
@@ -709,6 +740,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     ): Promise<{
       readonly text: string
       readonly threadId: string | undefined
+      readonly native?: NativeReceipt
       readonly blocks?: readonly ContentBlockLike[] | undefined
     }> => {
       // A delegation may name its own working directory; the session's is the
@@ -749,7 +781,15 @@ export function apply(ctx: Context, config: Config = {}): void {
       const runSchema = call.outputSchema === undefined
         ? undefined
         : checkedOutputSchema(call.outputSchema)
-      const callPermission = resolvePermissionOverride(resolved.permissionMode, call.permissionMode)
+      const defaults = readNativeDefault(resolved.native)
+      const native = call.review === undefined
+        ? resolveDesktopNative(defaults, call.native, resolved.modelSelection)
+        : { version: 1 as const, agents: { enabled: false }, review: call.review }
+      if (call.review !== undefined && (call.threadId !== undefined || runSchema !== undefined || (runImages?.length ?? 0) > 0)) {
+        throw new Error('subagent_codex_review: review requires a fresh thread without images or output_schema')
+      }
+      const callPermission = call.review === undefined
+        ? resolvePermissionOverride(resolved.permissionMode, call.permissionMode) : 'read-only'
       const timeoutMs = runTimeout ?? resolved.runTimeoutMs
       // One absolute deadline for this call, shared by the auto-resume retry: a
       // second attempt after a failed resume must not receive a fresh budget.
@@ -758,9 +798,13 @@ export function apply(ctx: Context, config: Config = {}): void {
 
       // An explicit thread id wins; then an explicit mode; then the session's
       // remembered thread; then the configured default.
-      const configured = resolved.threadMode
-      const mode = call.threadMode ?? (configured === 'ephemeral' ? 'ephemeral' : 'persistent')
-      const remembered = sessionThread.get(String(agent.id))
+      const configured = call.review === undefined ? resolved.threadMode : 'ephemeral'
+      const mode = call.review === undefined
+        ? call.threadMode ?? (configured === 'ephemeral' ? 'ephemeral' : 'persistent') : 'ephemeral'
+      const binding = nativeSessionKey(native, runCwd, call.model, call.reasoningEffort, callPermission)
+      const saved = sessionThread.get(String(agent.id))
+      // A live native/model/permission change cannot be hidden by an implicit resume.
+      const remembered = saved?.binding === binding ? saved.id : undefined
       const explicit = call.threadId
       const choice = chooseThread({
         explicit,
@@ -790,6 +834,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       try {
         const outcome = await delegateOnce({
           prompt: call.prompt,
+          ...(native === undefined ? {} : { native }),
           cwd: runCwd,
           command: resolved.command,
           permissionMode: callPermission,
@@ -809,7 +854,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           onProgress,
         })
         if (mode === 'persistent' && outcome.threadId !== undefined) {
-          sessionThread.set(String(agent.id), outcome.threadId)
+          sessionThread.set(String(agent.id), { id: outcome.threadId, binding })
         }
         diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'} `
           + `images=${String(outcome.images?.length ?? 0)} usage=${outcome.usage.status}`
@@ -821,8 +866,14 @@ export function apply(ctx: Context, config: Config = {}): void {
           diag(`run config: requested=${JSON.stringify(outcome.configuration.requested)} `
             + `effective=${JSON.stringify(outcome.configuration.effective)}`)
         }
-        return await deliverResult(outcome, mode, machineOutput)
+        return { ...(await deliverResult(outcome, mode, machineOutput)),
+          ...(outcome.native === undefined ? {} : { native: outcome.native }) }
       } catch (error: unknown) {
+        const receipt = error instanceof CodexDelegationFailure ? error.outcome?.native
+          : error instanceof CodexRunFailure ? error.native : undefined
+        if (receipt !== undefined && error instanceof Error) {
+          error.message += '; ' + nativeDiagnostic(receipt)
+        }
         // A session's remembered thread can be gone — the user removed it, or the
         // Codex state moved. That is this plugin's own bookkeeping, so a fresh
         // thread is the right repair; an id the caller passed explicitly is not
@@ -850,6 +901,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           sessionThread.delete(String(agent.id))
           const outcome = await delegateOnce({
             prompt: call.prompt,
+            ...(native === undefined ? {} : { native }),
             cwd: runCwd,
             command: resolved.command,
             permissionMode: callPermission,
@@ -867,11 +919,12 @@ export function apply(ctx: Context, config: Config = {}): void {
             onStart: (id) => { diag(`run: published ${id}`) },
             onProgress,
           })
-          if (outcome.threadId !== undefined) sessionThread.set(String(agent.id), outcome.threadId)
+          if (outcome.threadId !== undefined) sessionThread.set(String(agent.id), { id: outcome.threadId, binding })
           diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'} `
             + `images=${String(outcome.images?.length ?? 0)} usage=${outcome.usage.status} `
             + `cleanup=${outcome.cleanup.confirmed ? 'confirmed' : 'UNCONFIRMED'}`)
-          return await deliverResult(outcome, mode, machineOutput)
+          return { ...(await deliverResult(outcome, mode, machineOutput)),
+          ...(outcome.native === undefined ? {} : { native: outcome.native }) }
         }
         throw error
       } finally {
@@ -880,7 +933,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
 
     try {
-      agent.ctx.tools.register(createCodexTool({
+      const toolOptions: CodexToolOptions = {
         cwd,
         modelSelectionEnabled: selection,
         backgroundEnabled: jobs !== undefined,
@@ -917,8 +970,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           diag(`serve: background job ${id} started for "${call.label}"`)
           return id
         },
-      }))
-      diag(`serve ${String(agent.id)}: subagent_codex registered `
+      }
+      agent.ctx.tools.register(createCodexTool(toolOptions))
+      agent.ctx.tools.register(createCodexReviewTool(toolOptions))
+      diag(`serve ${String(agent.id)}: subagent_codex and subagent_codex_review registered `
         + `(modelSelection=${String(selection)}, background=${String(jobs !== undefined)}, `
         + `model=${resolved.model ?? '<default>'}, via=app-server)`)
     } catch (error: unknown) {

@@ -28,3 +28,9 @@
         #
         # `modelSelection: false` hides `model` and `reasoning_effort` from the
         # tool schema entirely.
+
+        #
+        # Native defaults are intentionally unset. Configure the codex-pro row
+        # in the Plugins page or add version: 1 / agents here. native: null
+        # explicitly disables agents; omission inherits CLI defaults.
+        # Review is always an explicit subagent_codex_review operation.
