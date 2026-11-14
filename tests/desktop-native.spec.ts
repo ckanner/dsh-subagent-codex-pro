@@ -71,11 +71,11 @@ test('real Config schema preserves absent/null inheritance and rejects invalid n
       { version: 1, unknownSwitch: true }, { version: 1, agents: { enabled: true, extra: undefined } },
       { version: 1, agents: { enabled: false, defaultModel: 'residual' } },
       { version: 1, agents: { enabled: true, defaultModel: '' } },
-      { version: 1, agents: { enabled: true, defaultEffort: '\\0' } },
+      { version: 1, agents: { enabled: true, defaultEffort: String.fromCharCode(0) } },
       { version: 1, agents: { enabled: true, defaultModel: 'x'.repeat(65537) } },
       { version: 1, agents: { enabled: true, maxConcurrentThreads: Number.MAX_SAFE_INTEGER } },
       { version: 1, review: { target: { type: 'uncommittedChanges' } } },
-    ]) assert.throws(() => schema({ native }))
+    ]) assert.throws(() => schema({ native }), JSON.stringify(native).slice(0, 200))
   }
   assert.throws(() => readNativeDefault({ version: 1, review: { target: { type: 'uncommittedChanges' } } }), /subagent_codex_review/)
 })
@@ -224,11 +224,12 @@ test('full child evidence survives direct and background tools without changing 
   assert.equal(rendered[0].type, 'text')
   assert.equal(JSON.parse((rendered[0] as any).text).message, 'MACHINE_OK')
   assert.equal(JSON.parse((rendered[1] as any).text).native.children.count, 1)
-  await h.call({ run_in_background: true })
+  await h.call({ run_in_background: true, output_schema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] } })
   const job = await h.jobs[0]!.done
   assert.equal(job.status, 'completed')
   const evidence = JSON.parse(job.result!)
   assert.equal(evidence.text, '{"message":"MACHINE_OK"}')
+  assert.equal(JSON.parse(evidence.text).message, 'MACHINE_OK')
   assert.equal(evidence.native.children[0].state, 'completed')
 })
 
@@ -246,4 +247,39 @@ test('pending native children cannot produce success and their evidence survives
   const job = await h.jobs[0]!.done
   assert.equal(job.status, 'failed')
   assert.deepEqual(JSON.parse(job.result!).native.completion.pendingIds, ['child-1'])
+})
+
+
+test('desktop caller cancellation interrupts an owned native child and preserves confirmed cleanup evidence', async t => {
+  const h = harness(t, { native: enabled }, 'native-child-hang')
+  const controller = new AbortController()
+  const observed = h.registered.get('subagent_codex')!.execute({
+    description: 'cancel native work', prompt: 'fixture',
+  }, { signal: controller.signal }).then(
+    () => { throw new Error('cancelled native work unexpectedly succeeded') },
+    error => error,
+  )
+  const deadline = Date.now() + 3000
+  while (!h.messages().some(m => m.id === 701 && 'result' in m) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const reached = h.messages().some(m => m.id === 701 && 'result' in m)
+  controller.abort(new Error('caller cancelled fixture'))
+  const error = await observed
+  assert.ok(reached, 'fixture reached an owned child approval')
+  assert.equal(error.outcome.stopReason, 'aborted')
+  assert.equal(error.outcome.native.cleanup.confirmed, true)
+  assert.deepEqual(error.outcome.native.completion.pendingIds, ['child-1'])
+  assert.ok(h.messages().some(m => m.method === 'turn/interrupt' && m.params.threadId === 'child-1'))
+})
+
+test('desktop native mismatch rejects before thread dispatch and retains startup evidence', async t => {
+  const h = harness(t, { native: enabled }, 'native-mismatch')
+  await assert.rejects(h.call(), (error: any) => {
+    assert.equal(error.native.effective.matched, false)
+    assert.equal(error.native.cleanup.confirmed, true)
+    assert.match(error.message, /effectiveMatched/)
+    return true
+  })
+  assert.equal(h.messages().some(m => ['thread/start', 'thread/resume', 'turn/start', 'review/start'].includes(m.method)), false)
 })

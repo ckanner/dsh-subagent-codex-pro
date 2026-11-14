@@ -46,7 +46,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     reply(message.id, {})
   } else if (message.method === 'turn/start' || message.method === 'review/start') {
     reply(message.id, { turn: { id: 'machine-turn' }, reviewThreadId: p.threadId })
-    if (mode.startsWith('native-child')) {
+    // A disabled native policy must not spawn fixture children on a later live-settings call.
+    if (mode.startsWith('native-child') && config['agents.enabled'] !== false) {
       notify('turn/started', { threadId: 'child-1', turn: { id: 'child-turn' } })
       notify('thread/tokenUsage/updated', { threadId: 'child-1', turnId: 'child-turn', tokenUsage: { total: usage(50) } })
       if (mode !== 'native-child-early-root') notify('item/completed', { threadId: p.threadId, turnId: 'machine-turn', item: { type: 'collabAgentToolCall', id: 'spawn-1', tool: 'spawnAgent', senderThreadId: p.threadId, receiverThreadIds: ['child-1'], model: 'child-model', agentsStates: { 'child-1': { status: 'running' } } } })
