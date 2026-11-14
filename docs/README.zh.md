@@ -18,6 +18,10 @@ tools.subagent_codex({
 })
 ```
 
+## 0.10.0 原生机器能力
+
+公开 machine API 新增 Codex 原生多 Agent、逐子线程事件与用量、独立新线程原生 Review，以及显式关闭控制。子 Agent 继续使用原生工具和已配置权限，取消后核对实际进程清理；恢复只读已有回执，不自动重跑。详见[完整能力契约](native-capabilities.md)。本次为源码候选，未发布 npm，也不代表用户 Mac 或真实模型已验收。
+
 ## 0.8.0 正式机器入口与迁移
 
 新增 [machine API/CLI](machine.md)，让 Go 等编排器直接复用本包的 Codex 运行核心，

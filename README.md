@@ -14,6 +14,10 @@ tools.subagent_codex({
 })
 ```
 
+## Native machine capabilities
+
+The 0.10.0 source candidate adds native agents, owned child events, independent native review and explicit off controls to protocol 1. See [the native capability contract](docs/native-capabilities.md). Existing requests and desktop PTC behavior remain compatible.
+
 ## 0.9.0: durable lifecycle and recovery
 
 The public machine API now exposes awaitable typed checkpoints, a private
@@ -544,7 +548,7 @@ completed commands and file changes, plus Codex's `commentary` messages — so
 | continuable / thread reuse | ✅ `session` reuses one; `thread_id` continues any |
 | `maxDepth` / persona / `toolFilter` | ❌ not applicable — see below |
 
-The three refusals above are not gaps to be filled. A Codex delegation is a **leaf**: it has no DSH child
+The three refusals above are not gaps to be filled. A Codex delegation is a **DSH leaf**: it has no DSH child
 agent, so a delegation-depth cap has nothing to cap. Its tools are Codex's own — the shell, the patch tool, its
 own MCP servers — not this harness's, so a **tool filter**, which names DSH tools, cannot describe them; restrict
 Codex through its own configuration instead. And a **persona** is a system instruction for a child agent, where
@@ -555,7 +559,3 @@ Use the official provider when its configuration and result contract meet your
 needs. This package adds per-call configuration and a public machine receipt
 for external orchestrators. Its compatibility is checked against the documented
 DSH/Codex baselines; new upstream releases still require contract verification.
-
-## Native machine capabilities
-
-The 0.10.0 source candidate adds native agents, owned child events, independent native review and explicit off controls to protocol 1. See [the native capability contract](docs/native-capabilities.md). Existing requests and desktop PTC behavior remain compatible.
