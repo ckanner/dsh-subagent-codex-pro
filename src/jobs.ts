@@ -11,6 +11,8 @@
  * @module dsh-subagent-codex-pro/jobs
  */
 
+import type { NativeReceipt } from './native.ts'
+
 /** The settlement record a producer's `done` must resolve to. */
 export interface JobOutcomeLike {
   readonly status: 'completed' | 'killed' | 'failed'
@@ -30,15 +32,19 @@ export interface JobOutcomeLike {
  * @returns the outcome record the jobs registry accepts.
  */
 export async function settleJob(
-  delegation: Promise<{ readonly text: string; readonly threadId: string | undefined }>,
+  delegation: Promise<{ readonly text: string; readonly threadId: string | undefined; readonly native?: NativeReceipt }>,
 ): Promise<JobOutcomeLike> {
   try {
-    const { text } = await delegation
-    return { status: 'completed', result: text }
+    const { text, native, threadId } = await delegation
+    return { status: 'completed', result: native === undefined ? text : JSON.stringify({ text, threadId: threadId ?? null, native }) }
   } catch (error: unknown) {
+    const evidence = error !== null && typeof error === 'object'
+      ? error as { native?: NativeReceipt; outcome?: { native?: NativeReceipt } } : undefined
+    const native = evidence?.native ?? evidence?.outcome?.native
     return {
       status: 'failed',
       detail: error instanceof Error ? error.message : String(error),
+      ...(native === undefined ? {} : { result: JSON.stringify({ native }) }),
     }
   }
 }

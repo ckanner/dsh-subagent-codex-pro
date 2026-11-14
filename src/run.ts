@@ -904,6 +904,14 @@ export async function startCodexRun(
       const cleanupDetail = `process cleanup could not be confirmed${cleanup.detail === undefined ? '' : `: ${cleanup.detail}`}`
       diagnostic = diagnostic === undefined ? cleanupDetail : `${diagnostic}; ${cleanupDetail}`
     }
+    const native = wire.nativeReport(cleanup.confirmed)
+    if (native !== undefined && (!native.effective.matched || !native.completion.confirmed || !native.cleanup.confirmed)) {
+      if (stopReason === 'completed') stopReason = 'error'
+      failure ??= { stage: 'native', category: !native.effective.matched ? 'configuration' : 'completion' }
+      diagnostic = appendDiagnostic(diagnostic, !native.effective.matched
+        ? 'native configuration was not confirmed'
+        : 'native child completion or cleanup could not be confirmed')
+    }
     if (effectiveTruncated) {
       if (truncated) failure = { stage: 'output', category: 'output-limit' }
       else failure ??= { stage: 'output', category: 'output-incomplete' }
@@ -929,7 +937,7 @@ export async function startCodexRun(
     }
 
     return {
-      ...(wire.nativeReport(cleanup.confirmed) === undefined ? {} : { native: wire.nativeReport(cleanup.confirmed)! }),
+      ...(native === undefined ? {} : { native }),
       output,
       stopReason,
       ...(diagnostic === undefined ? {} : { diagnostic }),
@@ -1054,6 +1062,7 @@ export class CodexDelegationFailure extends Error {
 
 /** The successful result of `delegateOnce`, with the observability fields intact. */
 export interface DelegatedCodexRun {
+  readonly native?: NativeReceipt
   readonly text: string
   readonly threadId: string | undefined
   readonly images: readonly CodexImage[]
@@ -1070,6 +1079,8 @@ export interface DelegatedCodexRun {
 export async function runCodexOnce(
   options: {
     readonly prompt: string
+    readonly native?: NativeRequest | undefined
+    readonly onNativeEvent?: ((event: NativeEvent) => void) | undefined
     readonly cwd: string
     readonly command: string
     readonly permissionMode: CodexPermissionMode
@@ -1095,6 +1106,8 @@ export async function runCodexOnce(
   const run = await startCodexRun(
     [{ type: 'text', text: options.prompt }],
     {
+      ...(options.native === undefined ? {} : { native: options.native }),
+      ...(options.onNativeEvent === undefined ? {} : { onNativeEvent: options.onNativeEvent }),
       cwd: options.cwd,
       command: options.command,
       permissionMode: options.permissionMode,
@@ -1135,6 +1148,8 @@ export async function runCodexOnce(
  * @throws `CodexDelegationFailure` when the run does not complete.
  */
 export async function delegateOnce(options: {
+  readonly native?: NativeRequest | undefined
+  readonly onNativeEvent?: ((event: NativeEvent) => void) | undefined
   readonly prompt: string
   readonly cwd: string
   readonly command: string
@@ -1182,6 +1197,7 @@ export async function delegateOnce(options: {
     )
   }
   return {
+    ...(outcome.native === undefined ? {} : { native: outcome.native }),
     text,
     threadId: outcome.threadId,
     images: outcome.images ?? [],

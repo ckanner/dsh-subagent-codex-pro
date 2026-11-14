@@ -14,7 +14,8 @@
       "types": "./lib/types/machine.d.ts",
       "default": "./lib/machine.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": "./assets/native-client.js"
   },
   "bin": {
     "codex-pro-machine": "lib/machine-cli.js"
@@ -31,11 +32,19 @@
     "docs/machine-lifecycle.md",
     "docs/machine-lifecycle.zh.md",
     "docs/machine-lifecycle-validation.md",
-    "docs/native-capabilities.md"
+    "docs/native-capabilities.md",
+    "assets/native-client.js"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {
@@ -48,7 +57,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "@deepseek-ai/schemastery": "3.19.0",
+    "react": "18.3.1",
+    "react-test-renderer": "18.3.1"
   },
   "license": "MIT",
   "engines": {
@@ -73,5 +85,13 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   }
 }

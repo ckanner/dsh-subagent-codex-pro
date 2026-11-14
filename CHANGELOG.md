@@ -2,6 +2,11 @@
 
 ## 0.10.0 (source candidate)
 
+- Add a real DSH native settings page, a live Config schema, whole-object per-call overrides and explicit null/off semantics. Keep default inheritance distinct from off.
+- Wire desktop/PTC delegation and the Host provider through native validation, app-server configuration, child lifecycle and receipts; invalidate implicit session reuse when the effective binding changes.
+- Add a dedicated fresh, read-only subagent_codex_review tool. Review cannot become an ordinary delegation default or silently ignore prompt/schema/resume arguments.
+- Preserve native receipts in direct tools and background results, report bounded Host evidence, reject unfinished children, and retain image attachment blocks in PTC rendering.
+
 - Add optional native capability v1 controls, verified scoped Codex configuration, V2 backend selection and explicit off across both backends.
 - Preserve full native agent tools/permissions; collect owned child states, model evidence and deduplicated baseline-aware usage without mixing observations into the model answer.
 - Add independent fresh-thread native review, correct review model/effort configuration and explicit native combination constraints.

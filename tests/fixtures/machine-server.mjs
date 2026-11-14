@@ -42,6 +42,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (mode === 'native-child-early-root') notify('thread/started', { thread: { id: 'child-1', model: 'child-model',
       source: { subAgent: { thread_spawn: { parent_thread_id: result.thread.id } } } } })
     reply(message.id, result)
+  } else if (message.method === 'thread/name/set') {
+    reply(message.id, {})
   } else if (message.method === 'turn/start' || message.method === 'review/start') {
     reply(message.id, { turn: { id: 'machine-turn' }, reviewThreadId: p.threadId })
     if (mode.startsWith('native-child')) {
@@ -51,7 +53,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       notify('thread/tokenUsage/updated', { threadId: 'child-1', turnId: 'child-turn', tokenUsage: { total: usage(50) } })
       send({ id: 701, method: 'item/commandExecution/requestApproval', params: { threadId: 'child-1', turnId: 'child-turn', itemId: 'child-command' } })
       if (mode === 'native-child-hang') continue
-      notify('turn/completed', { threadId: 'child-1', turn: { id: 'child-turn', status: 'completed' } })
+      if (mode !== 'native-child-pending') notify('turn/completed', { threadId: 'child-1', turn: { id: 'child-turn', status: 'completed' } })
     }
     if (mode === 'declined') {
       send({ jsonrpc: '2.0', id: 700, method: 'item/commandExecution/requestApproval',

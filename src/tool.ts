@@ -18,9 +18,14 @@
 
 import type { ToolDefinitionLike } from './dsh-types.ts'
 import type { CodexPermissionMode } from './wire.ts'
+import { desktopNativeSchema, reviewTargetSchema, parseDesktopNative, nativeDiagnostic, type DesktopNative } from './desktop-native.ts'
+import { parseNativeRequest, type NativeRequest, type NativeReceipt } from './native.ts'
 
 /** One call's choices, already resolved against the configured defaults. */
 export interface CodexCall {
+  readonly native?: DesktopNative
+  /** Set only by the dedicated review tool; normal delegation rejects native.review. */
+  readonly review?: NativeRequest['review']
   readonly label: string
   readonly prompt: string
   readonly model?: string
@@ -69,6 +74,7 @@ export interface CodexToolOptions {
   readonly run: (request: CodexCall & { readonly signal: AbortSignal }) => Promise<{
     readonly text: string
     readonly threadId: string | undefined
+    readonly native?: NativeReceipt
     /**
      * Content blocks to hand the model, when the run produced more than text.
      *
@@ -133,6 +139,9 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         ? ' A delegation typically takes a minute or more: set `run_in_background` unless your next action'
           + ' depends on the result.'
         : '')
+      + ' Native agent defaults come from the plugin settings. Supply native to replace them for this call;'
+      + ' null turns agents off. Native operations still run inside Codex with the same permission boundary.'
+      + ' Use subagent_codex_review for an explicit native review operation.'
       + ' A delegation is cancelled if it exceeds the deadline the plugin is configured with, and the result says so.'
       + (options.threadControlEnabled
         ? ' A delegation runs in a Codex thread whose lifetime is `'
@@ -149,6 +158,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
     parameters: {
       type: 'object',
       properties: {
+        native: desktopNativeSchema,
         description: {
           type: 'string',
           description: 'A short (3-5 word) description of the delegated task, for display.',
@@ -255,7 +265,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
               {
                 type: 'object',
                 additionalProperties: false,
-                properties: { content: { type: 'array', items: {} } },
+                properties: { content: { type: 'array', items: {} }, native: { type: 'object' } },
                 required: ['content'],
               },
               {
@@ -272,7 +282,7 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
         : {
             type: 'object',
             additionalProperties: false,
-            properties: { content: { type: 'array', items: {} } },
+            properties: { content: { type: 'array', items: {} }, native: { type: 'object' } },
             required: ['content'],
           },
       render: (_args: unknown, value: unknown) => {
@@ -283,81 +293,84 @@ export function createCodexTool(options: CodexToolOptions): ToolDefinitionLike {
           }]
         }
         const content = isContentResult(value) ? value.content : []
-        const text = content
-          .filter((block) => block.type === 'text' && typeof block.text === 'string')
-          .map((block) => block.text as string)
-          .join('\n\n')
-        // The text already names the images, because a background call has only
-        // the text to go on; repeating the count here would say it twice.
-        return [{
-          type: 'text' as const,
-          text: text === '' ? '(the delegation produced no text)' : text,
-        }]
+        const rendered: ({ type: 'text'; text: string } | { type: 'image'; attachment: unknown })[] = []
+        for (const block of content) {
+          if (block.type === 'text' && typeof block.text === 'string') rendered.push({ type: 'text', text: block.text })
+          else if (block.type === 'image' && block.attachment !== undefined) {
+            rendered.push({ type: 'image', attachment: block.attachment })
+          }
+        }
+        if (rendered.length === 0) rendered.push({ type: 'text', text: '(the delegation produced no text)' })
+        const native = typeof value === 'object' && value !== null && 'native' in value
+          ? value.native as NativeReceipt | undefined : undefined
+        if (native !== undefined) rendered.push({ type: 'text', text: nativeDiagnostic(native) })
+        return rendered
       },
     },
     async execute(args: unknown, exec: { readonly signal: AbortSignal }): Promise<unknown> {
-      const request = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
-      const prompt = typeof request.prompt === 'string' ? request.prompt : ''
-      if (prompt === '') throw new Error('subagent_codex: `prompt` is required and must not be empty')
-      const model = typeof request.model === 'string' && request.model !== '' ? request.model : options.model
-      const effort = typeof request.reasoning_effort === 'string' && request.reasoning_effort !== ''
-        ? request.reasoning_effort
-        : options.reasoningEffort
-      const label = typeof request.description === 'string' && request.description !== ''
-        ? request.description
-        : 'Codex delegation'
-      const cwd = typeof request.cwd === 'string' && request.cwd !== '' ? request.cwd : undefined
-      const timeoutMs = typeof request.timeout_ms === 'number' ? request.timeout_ms : undefined
-      const outputSchema = typeof request.output_schema === 'object' && request.output_schema !== null
-        && !Array.isArray(request.output_schema)
-        ? request.output_schema as Record<string, unknown>
-        : undefined
-      const permissionMode = request.permission_mode === 'read-only'
-        || request.permission_mode === 'workspace-write'
-        || request.permission_mode === 'never'
-        || request.permission_mode === 'approve-for-me'
-        || request.permission_mode === 'dangerously-bypass-approvals-and-sandbox'
-        ? request.permission_mode as CodexPermissionMode
-        : undefined
-      if (request.permission_mode !== undefined && permissionMode === undefined) {
-        throw new Error('subagent_codex: permission_mode must be one of read-only, workspace-write, never, '
-          + 'approve-for-me, dangerously-bypass-approvals-and-sandbox')
+      const allowed = ['description', 'prompt', 'native', 'timeout_ms', 'output_schema', 'images', 'cwd', 'permission_mode',
+        ...(options.modelSelectionEnabled ? ['model', 'reasoning_effort'] : []),
+        ...(options.backgroundEnabled ? ['run_in_background'] : []),
+        ...(options.threadControlEnabled ? ['thread_mode', 'thread_id'] : [])]
+      const request = checkedArguments(args, allowed, 'subagent_codex')
+      const prompt = typeof request.prompt === 'string' && request.prompt.trim() !== ''
+        ? optionalText(request, 'prompt') : undefined
+      if (prompt === undefined) throw new Error('subagent_codex: `prompt` is required and must not be empty')
+      const model = optionalText(request, 'model') ?? options.model
+      const effort = optionalText(request, 'reasoning_effort') ?? options.reasoningEffort
+      const label = optionalText(request, 'description') ?? 'Codex delegation'
+      const cwd = optionalText(request, 'cwd')
+      const timeoutMs = request.timeout_ms
+      if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 0)) {
+        throw new Error('subagent_codex: timeout_ms must be non-negative safe integer milliseconds')
       }
-      const images = Array.isArray(request.images)
-        ? request.images.filter((value): value is string => typeof value === 'string' && value !== '')
-        : undefined
-      const threadMode = request.thread_mode === 'ephemeral' || request.thread_mode === 'persistent'
-        ? request.thread_mode
-        : undefined
-      const threadId = typeof request.thread_id === 'string' && request.thread_id !== ''
-        ? request.thread_id
-        : undefined
+      const outputSchema = request.output_schema
+      if (outputSchema !== undefined && (typeof outputSchema !== 'object' || outputSchema === null
+        || Array.isArray(outputSchema) || !('type' in outputSchema) || outputSchema.type !== 'object')) {
+        throw new Error('subagent_codex: output_schema must be an object-rooted JSON Schema')
+      }
+      const permissionMode = request.permission_mode
+      if (permissionMode !== undefined && !permissionModes.includes(permissionMode as CodexPermissionMode)) {
+        throw new Error('subagent_codex: permission_mode is invalid or exceeds the configured policy')
+      }
+      const images = request.images
+      if (images !== undefined && (!Array.isArray(images) || images.some(value => typeof value !== 'string' || value.trim() === ''))) {
+        throw new Error('subagent_codex: images must be an array of non-empty paths')
+      }
+      const threadMode = request.thread_mode
+      if (threadMode !== undefined && threadMode !== 'ephemeral' && threadMode !== 'persistent') {
+        throw new Error('subagent_codex: thread_mode must be ephemeral or persistent')
+      }
+      const threadId = optionalText(request, 'thread_id')
+      if (threadId !== undefined && threadMode === 'ephemeral') throw new Error('subagent_codex: thread_id requires a persistent thread')
+      if (request.run_in_background !== undefined && typeof request.run_in_background !== 'boolean') {
+        throw new Error('subagent_codex: run_in_background must be a boolean')
+      }
+      const native = parseDesktopNative(request.native)
       const call: CodexCall = {
-        label,
-        prompt,
+        label, prompt,
+        ...(request.native === undefined ? {} : { native: request.native === null ? null : native! }),
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
-        ...(permissionMode === undefined ? {} : { permissionMode }),
+        ...(permissionMode === undefined ? {} : { permissionMode: permissionMode as CodexPermissionMode }),
         ...(threadMode === undefined ? {} : { threadMode }),
         ...(threadId === undefined ? {} : { threadId }),
         ...(cwd === undefined ? {} : { cwd }),
-        ...(images === undefined || images.length === 0 ? {} : { images }),
-        ...(outputSchema === undefined ? {} : { outputSchema }),
-        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        ...(images === undefined || (images as string[]).length === 0 ? {} : { images: images as string[] }),
+        ...(outputSchema === undefined ? {} : { outputSchema: outputSchema as Record<string, unknown> }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }),
       }
       if (options.backgroundEnabled && request.run_in_background === true) {
         return { kind: 'background' as const, jobId: options.startBackground(call) }
       }
-      // The runner owns how a thread id reaches the model: it appends the marker
-      // to the text, so a background job's collected result carries the id too.
-      const { text, blocks } = await options.run({ ...call, signal: exec.signal })
-      return { content: blocks ?? [{ type: 'text', text }] }
+      const { text, blocks, native: receipt } = await options.run({ ...call, signal: exec.signal })
+      return { content: blocks ?? [{ type: 'text', text }], ...(receipt === undefined ? {} : { native: receipt }) }
     },
   }
 }
 
 /** Whether a tool result carries content blocks. */
-function isContentResult(value: unknown): value is { content: readonly { type: string; text?: string }[] } {
+function isContentResult(value: unknown): value is { content: readonly { type: string; text?: string; attachment?: unknown }[] } {
   return typeof value === 'object' && value !== null
     && Array.isArray((value as { content?: unknown }).content)
 }
@@ -367,4 +380,58 @@ function isBackgroundHandle(value: unknown): value is { jobId: string } {
   return typeof value === 'object' && value !== null
     && (value as { kind?: unknown }).kind === 'background'
     && typeof (value as { jobId?: unknown }).jobId === 'string'
+}
+
+
+/** Reject unknown keys even when a caller bypasses the Host's JSON Schema validator. */
+function checkedArguments(args: unknown, allowed: readonly string[], name: string): Record<string, unknown> {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) throw new Error(name + ': arguments must be an object')
+  const request = args as Record<string, unknown>
+  const unexpected = Object.keys(request).find(key => !allowed.includes(key))
+  if (unexpected !== undefined) throw new Error(name + ': unsupported argument ' + unexpected)
+  return request
+}
+
+function optionalText(request: Record<string, unknown>, key: string): string | undefined {
+  const value = request[key]
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || value.trim() === '' || value.includes('\0')) {
+    throw new Error('subagent_codex: ' + key + ' must be a non-empty string')
+  }
+  return value
+}
+
+/**
+ * A fresh read-only review/start operation. Target is explicit; prompt, images,
+ * output_schema, thread_id and native defaults cannot change or be ignored by it.
+ */
+export function createCodexReviewTool(options: CodexToolOptions): ToolDefinitionLike {
+  const common = createCodexTool({ ...options, permissionMode: 'read-only', defaultThreadMode: 'ephemeral', threadControlEnabled: false })
+  const commonProperties = common.parameters.properties as Record<string, unknown>
+  const allowed = ['description', 'target', 'timeout_ms', 'cwd',
+    ...(options.modelSelectionEnabled ? ['model', 'reasoning_effort'] : []),
+    ...(options.backgroundEnabled ? ['run_in_background'] : [])]
+  return {
+    name: 'subagent_codex_review',
+    description: 'Run an explicit native Codex review of uncommitted changes, a base branch, a commit, or custom review instructions. '
+      + 'Always uses a fresh ephemeral thread, a read-only sandbox, unattended approvals=never, and agents off. '
+      + 'Ordinary delegation and plugin native defaults never invoke review. Choose the target explicitly; there is no ignored task prompt, resume, images, or output schema.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['description', 'target'],
+      properties: Object.fromEntries(allowed.map(key => [key, key === 'target' ? reviewTargetSchema : commonProperties[key]])),
+    },
+    output: common.output,
+    async execute(args, exec) {
+      const request = checkedArguments(args, allowed, 'subagent_codex_review')
+      const native = parseNativeRequest({ version: 1, agents: { enabled: false }, review: { target: request.target } })
+      const review = native.review!
+      const tool = createCodexTool({
+        ...options, permissionMode: 'read-only', defaultThreadMode: 'ephemeral', threadControlEnabled: false,
+        run: call => options.run({ ...call, review, threadMode: 'ephemeral', permissionMode: 'read-only' }),
+        startBackground: call => options.startBackground({ ...call, review, threadMode: 'ephemeral', permissionMode: 'read-only' }),
+      })
+      const { target: _target, ...values } = request
+      return await tool.execute({ ...values, prompt: 'Run the explicitly requested native review.', native: null }, exec)
+    },
+  }
 }
