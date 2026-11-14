@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** One request on stdin, one versioned receipt on stdout. No DSH parent required. */
 import { readFileSync } from 'node:fs'
-import { MachineInputError, parseMachineRequest, runMachine, MACHINE_LIFECYCLE_CAPABILITIES } from './machine.ts'
+import { MachineInputError, parseMachineRequest, runMachine, MACHINE_NATIVE_CAPABILITIES, MACHINE_LIFECYCLE_CAPABILITIES } from './machine.ts'
 
 const MAX_INPUT_BYTES = 1024 * 1024
 // A consumer may close the read end before the receipt is written. EPIPE is a
@@ -62,7 +62,7 @@ async function main(): Promise<number> {
       cancellation: ['SIGINT', 'SIGTERM'], ownership: 'supervised-group',
       effortEvidence: 'accepted-request-only', cost: 'unknown', inferenceRequests: 0,
       // The single-document CLI stays terminal-only; typed ACKs use the JS API.
-      javascriptLifecycle: MACHINE_LIFECYCLE_CAPABILITIES,
+      javascriptLifecycle: MACHINE_LIFECYCLE_CAPABILITIES, native: MACHINE_NATIVE_CAPABILITIES,
     }) + '\n')
     return 0
   }

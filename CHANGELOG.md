@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0 (source candidate)
+
+- Add optional native capability v1 controls, verified scoped Codex configuration, V2 backend selection and explicit off across both backends.
+- Preserve full native agent tools/permissions; collect owned child states, model evidence and deduplicated baseline-aware usage without mixing observations into the model answer.
+- Add independent fresh-thread native review, correct review model/effort configuration and explicit native combination constraints.
+- Propagate child events and terminal native evidence through the existing guardian, machine supervisor and read-only recovery lifecycle.
+- Keep the current child turn authoritative under replay and late completion, including failed terminal turns.
+- Keep protocol 1, authentication and absent-native behavior compatible. See [native capabilities](docs/native-capabilities.md) for exact evidence and validation limits.
+
 ## 0.9.0 (2026-11-12)
 
 - Add lifecycle v1 with awaited configuration-checked thread-ready, dispatch-intent,

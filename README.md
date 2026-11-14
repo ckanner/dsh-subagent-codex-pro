@@ -555,3 +555,7 @@ Use the official provider when its configuration and result contract meet your
 needs. This package adds per-call configuration and a public machine receipt
 for external orchestrators. Its compatibility is checked against the documented
 DSH/Codex baselines; new upstream releases still require contract verification.
+
+## Native machine capabilities
+
+The 0.10.0 source candidate adds native agents, owned child events, independent native review and explicit off controls to protocol 1. See [the native capability contract](docs/native-capabilities.md). Existing requests and desktop PTC behavior remain compatible.

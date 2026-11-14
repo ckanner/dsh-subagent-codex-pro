@@ -2,6 +2,7 @@
 import { fork } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import type { NativeEvent } from './native.ts'
 import type { MachineOptions, MachineReceipt, MachineRequest } from './machine.ts'
 import { validLifecycle } from './machine-recovery.ts'
 
@@ -85,6 +86,10 @@ export async function superviseMachine(request: MachineRequest, options: Machine
       )
     } else if (message.type === 'progress' && typeof message.text === 'string') {
       try { options.onProgress?.(message.text) } catch { /* Progress is display-only. */ }
+    } else if (message.type === 'native-event') {
+      const event = message.event as NativeEvent
+      if (event?.version !== 1 || !Number.isSafeInteger(event.sequence) || typeof event.id !== 'string') { invalid('invalid native event'); return }
+      try { options.onNativeEvent?.(event) } catch { /* Observations do not authorize execution. */ }
     } else if (message.type === 'result') {
       const value = message.receipt
       if (value === null || typeof value !== 'object' || Array.isArray(value)) { invalid('invalid machine supervisor receipt'); return }

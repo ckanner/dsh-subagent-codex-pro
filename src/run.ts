@@ -15,6 +15,7 @@
  * @module dsh-subagent-codex-pro/run
  */
 
+import { nativeArguments, type NativeRequest, type NativeReceipt, type NativeEvent } from './native.ts'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -86,6 +87,8 @@ export interface CodexRunExecution {
 export interface CodexRunSpec {
   /** Internal machine correlation selected before the supervised run starts. */
   readonly runId?: string
+  readonly native?: NativeRequest
+  readonly onNativeEvent?: ((event: NativeEvent) => void) | undefined
   /** The delegating session's working directory. */
   readonly cwd: string
   /** The Codex executable. */
@@ -171,6 +174,7 @@ export interface CodexRunLifecycle {
 
 /** What one finished run reports. */
 export interface CodexRunOutcome {
+  readonly native?: NativeReceipt
   readonly output: readonly { readonly type: 'text'; readonly text: string }[]
   readonly stopReason: CodexStopReason
   readonly diagnostic?: string
@@ -264,6 +268,7 @@ export interface FailureFacts {
 /** A run failure, kept for its structured facts and any cleanup it observed. */
 export class CodexRunFailure extends Error {
   readonly facts: FailureFacts
+  readonly native: NativeReceipt | undefined
   readonly cleanup: CleanupReport | undefined
   readonly execution: CodexRunExecution | undefined
   readonly configuration: AppliedConfiguration | undefined
@@ -272,6 +277,7 @@ export class CodexRunFailure extends Error {
   readonly turnConfiguration: TurnConfiguration | undefined
 
   constructor(facts: FailureFacts, cause?: unknown, cleanup?: CleanupReport, observations?: {
+    native?: NativeReceipt | undefined
     execution?: CodexRunExecution
     configuration?: AppliedConfiguration | undefined
     usage?: CodexUsageReport
@@ -283,6 +289,7 @@ export class CodexRunFailure extends Error {
       : ''
     super(`codex-pro: product subagent failure (${describeFacts(facts)})${cleanupDetail}`,
       cause === undefined ? undefined : { cause })
+    this.native = observations?.native
     this.facts = facts
     this.cleanup = cleanup
     this.execution = observations?.execution
@@ -369,7 +376,7 @@ function spawnAppServer(spec: CodexRunSpec): ManagedChild {
   const extension = import.meta.url.endsWith('.ts') ? '.ts' : '.js'
   const guardian = fileURLToPath(new URL(`./process-guardian${extension}`, import.meta.url))
   const proc = spawn(posix ? process.execPath : spec.command,
-    posix ? [guardian, spec.command, String(graceMs)] : ['app-server', '--stdio'], {
+    posix ? [guardian, spec.command, String(graceMs), JSON.stringify(nativeArguments(spec.native, { model: spec.model, effort: spec.effort ?? spec.reasoningEffort }))] : [...nativeArguments(spec.native, { model: spec.model, effort: spec.effort ?? spec.reasoningEffort }), 'app-server', '--stdio'], {
     cwd: spec.cwd,
     env: { ...process.env, ...spec.env },
     stdio: posix ? ['pipe', 'pipe', 'pipe', 'ipc'] : ['pipe', 'pipe', 'pipe'],
@@ -714,6 +721,7 @@ export async function startCodexRun(
     transport,
     {
       permissionMode: spec.permissionMode,
+      native: spec.native, onNativeEvent: spec.onNativeEvent, nativeCwd: spec.cwd, nativeReviewEffort: spec.effort ?? spec.reasoningEffort,
       model: spec.model,
       threadMode: spec.threadMode,
       originator: spec.originator ?? DEFAULT_ORIGINATOR,
@@ -827,6 +835,7 @@ export async function startCodexRun(
       : child.outputIncomplete() ? { stage: startupStage, category: 'output-incomplete' }
         : failure.facts
     throw new CodexRunFailure(facts, error, cleanup, {
+      ...(wire.nativeReport(cleanup.confirmed) === undefined ? {} : { native: wire.nativeReport(cleanup.confirmed) }),
       execution: execution(facts), configuration: wire.configuration,
       usage: partialUsage(wire.usageReport, 'startup ended without a completed turn'), rateLimits: wire.rateLimitsReport,
       turnConfiguration: wire.turnConfiguration,
@@ -920,6 +929,7 @@ export async function startCodexRun(
     }
 
     return {
+      ...(wire.nativeReport(cleanup.confirmed) === undefined ? {} : { native: wire.nativeReport(cleanup.confirmed)! }),
       output,
       stopReason,
       ...(diagnostic === undefined ? {} : { diagnostic }),

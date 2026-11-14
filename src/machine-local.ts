@@ -75,6 +75,8 @@ export async function runMachineLocal(value: MachineRequest, options: MachineOpt
     ...(request.threadId === undefined ? {} : { resumeThreadId: request.threadId }),
     ...(request.maxOutputBytes === undefined ? {} : { maxOutputBytes: request.maxOutputBytes }),
     ...(request.images === undefined ? {} : { images: request.images }),
+    ...(request.native === undefined ? {} : { native: request.native }),
+    ...(options.onNativeEvent === undefined ? {} : { onNativeEvent: options.onNativeEvent }),
     ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
     ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
@@ -91,8 +93,8 @@ export async function runMachineLocal(value: MachineRequest, options: MachineOpt
     const outcome = await run.result
     receipt = {
       protocol: 1, type: 'result', requestId: request.requestId, runId: run.id,
-      ok: outcome.stopReason === 'completed' && outcome.cleanup.confirmed,
-      requested, outcome, failure: null, costUSD: null, costStatus: 'unknown',
+      ok: outcome.stopReason === 'completed' && outcome.cleanup.confirmed && outcome.native?.completion.confirmed !== false,
+      requested, outcome, failure: null, ...(outcome.native === undefined ? {} : { native: outcome.native }), costUSD: null, costStatus: 'unknown',
     }
   } catch (error: unknown) {
     const failure = error instanceof CodexRunFailure ? error : undefined
@@ -109,6 +111,7 @@ export async function runMachineLocal(value: MachineRequest, options: MachineOpt
         turnConfiguration: failure?.turnConfiguration ?? null,
         cleanup: failure?.cleanup ?? null,
       },
+      ...(failure?.native === undefined ? {} : { native: failure.native }),
       costUSD: null, costStatus: 'unknown',
     }
   }

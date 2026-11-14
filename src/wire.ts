@@ -30,6 +30,7 @@ import { isAbsolute, resolve } from 'node:path'
 import { realpathSync } from 'node:fs'
 
 import type { LineTransport } from './jsonrpc.ts'
+import { NativeTracker, type NativeRequest, type NativeReceipt, type NativeEvent } from './native.ts'
 import { TokenUsageTracker, type CodexUsageReport, type TokenUsageNotificationLike } from './usage.ts'
 
 /** Prefix on every error this module raises. */
@@ -101,7 +102,7 @@ export interface AppliedConfiguration {
 export interface TurnConfiguration {
   readonly requestedEffort?: string
   readonly effectiveEffort: null
-  readonly evidence: 'turn/start-request'
+  readonly evidence: 'turn/start-request' | 'review/start-request'
   readonly accepted: boolean
 }
 
@@ -343,6 +344,10 @@ export interface WireOutput {
  * named decision the caller already holds.
  */
 export interface CodexWireOptions {
+  readonly native?: NativeRequest | undefined
+  readonly nativeCwd?: string | undefined
+  readonly nativeReviewEffort?: string | undefined
+  readonly onNativeEvent?: ((event: NativeEvent) => void) | undefined
   /** Unattended permission policy for the thread. */
   readonly permissionMode: CodexPermissionMode
   /** Model for `thread/start`, when the caller chose one. */
@@ -477,6 +482,8 @@ function requireAppliedConfiguration(configuration: AppliedConfiguration): void 
  * method must first become part of the provider contract.
  */
 export class CodexAppServerWire {
+  #native: NativeTracker | undefined
+  #nativeCwd: string | undefined
   #permissionMode: CodexPermissionMode
   #threadMode: CodexThreadMode
   #originator: string
@@ -523,6 +530,8 @@ export class CodexAppServerWire {
     transport: LineTransport,
     options: CodexWireOptions,
   ) {
+    this.#native = options.native === undefined ? undefined : new NativeTracker(options.native, options.onNativeEvent, { model: options.model, effort: options.nativeReviewEffort })
+    this.#nativeCwd = options.nativeCwd
     this.#permissionMode = options.permissionMode
     this.#model = options.model
     this.#threadMode = options.threadMode ?? 'ephemeral'
@@ -590,7 +599,10 @@ export class CodexAppServerWire {
     )
     this.#transport.notify('initialized')
     await this.#guarded(this.#transport.flush(), signal)
+    if (this.#native) this.#native.verifyConfiguration(await this.#guarded(this.#transport.request('config/read', { includeLayers: false, ...(this.#nativeCwd === undefined ? {} : { cwd: this.#nativeCwd }) }, { signal }), signal))
   }
+
+  nativeReport(cleanupConfirmed = false): NativeReceipt | undefined { return this.#native?.report(cleanupConfirmed) }
 
   /**
    * Create the run's thread and retain its identity.
@@ -614,6 +626,7 @@ export class CodexAppServerWire {
       await this.#guarded(this.#transport.request('thread/start', {
         cwd,
         ephemeral: this.#threadMode === 'ephemeral',
+        ...(this.#native === undefined ? {} : { config: this.#native.configurationOverrides }),
         ...this.#model === undefined ? {} : { model: this.#model },
         ...permission,
       }, { signal }), signal),
@@ -628,6 +641,7 @@ export class CodexAppServerWire {
         + `where ${this.#threadMode} was asked for`)
     }
     this.#threadId = id
+    this.#native?.setRoot(id)
     this.#usage.resetForNewThread(id)
     this.#flushEarlyUsage()
     this.#configuration = appliedConfiguration('thread/start', requested, response)
@@ -668,6 +682,7 @@ export class CodexAppServerWire {
       await this.#guarded(
         this.#transport.request('thread/resume', {
           threadId,
+          ...(this.#native === undefined ? {} : { config: this.#native.configurationOverrides }),
           ...(overrides.cwd === undefined ? {} : { cwd: overrides.cwd }),
           ...(overrides.model === undefined ? {} : { model: overrides.model }),
           ...(permission ?? {}),
@@ -684,6 +699,7 @@ export class CodexAppServerWire {
       if (id !== threadId) throw new Error(`${P}: thread/resume answered for ${id}, not ${threadId}`)
     }
     this.#threadId = threadId
+    this.#native?.setRoot(threadId)
     this.#usage.resetForResume(threadId)
     this.#flushEarlyUsage()
     this.#configuration = appliedConfiguration('thread/resume', requested, response)
@@ -829,12 +845,11 @@ export class CodexAppServerWire {
     this.#usage.startTurnRequest()
     this.#turnConfiguration = {
       ...(effort === undefined ? {} : { requestedEffort: effort }),
-      effectiveEffort: null, evidence: 'turn/start-request', accepted: false,
+      effectiveEffort: null, evidence: this.#native?.request.review ? 'review/start-request' : 'turn/start-request', accepted: false,
     }
     try {
-      const turn = object(
-        object(
-          await this.#guarded(this.#transport.request('turn/start', {
+      const response = object(
+          await this.#guarded(this.#transport.request(this.#native?.request.review ? 'review/start' : 'turn/start', this.#native?.request.review ? { threadId, delivery: 'inline', target: this.#native.request.review.target } : {
             threadId,
             // Images first, as `localImage`: the app-server enumerates its own
             // input variants and rejects anything else, and a host path is the
@@ -852,9 +867,9 @@ export class CodexAppServerWire {
             ...outputSchema === undefined ? {} : { outputSchema },
           }, { signal }), signal),
           'turn/start response',
-        ).turn,
-        'turn/start turn',
       )
+      if (this.#native?.request.review && response.reviewThreadId !== threadId) throw new Error(`${P}: review/start returned another thread`)
+      const turn = object(response.turn, 'turn/start turn')
       this.#commitTurnId(string(turn.id, 'turn/start turn id'))
       this.#usage.beginTurn(string(turn.id, 'turn/start turn id'))
       this.#turnConfiguration = { ...this.#turnConfiguration, accepted: true }
@@ -904,7 +919,9 @@ export class CodexAppServerWire {
    * authoritative when the child no longer accepts protocol requests.
    */
   interrupt(): void {
-    if (this.#threadId === undefined || this.#turnId === undefined || this.#closed) return
+    if (this.#closed) return
+    for (const child of this.#native?.running() ?? []) this.#transport.request('turn/interrupt', child).catch(() => {})
+    if (this.#threadId === undefined || this.#turnId === undefined) return
     this.#transport.request('turn/interrupt', { threadId: this.#threadId, turnId: this.#turnId }).catch(() => {})
   }
 
@@ -983,7 +1000,10 @@ export class CodexAppServerWire {
    * @returns `true` when the matching turn is still provisional.
    */
   #validateRunIds(params: Record0, nullableTurn = false): boolean {
-    if (params.threadId !== this.#threadId) throw new Error(`${P}: app-server request referenced another thread`)
+    if (params.threadId !== this.#threadId) {
+      if (this.#native?.acceptsTurn(params.threadId, params.turnId, nullableTurn)) return false
+      throw new Error(`${P}: app-server request referenced an unowned native thread or turn`)
+    }
     if (nullableTurn && params.turnId === null) return false
     const id = string(params.turnId, 'server request turn id')
     if (this.#turnId === undefined) {
@@ -1092,6 +1112,7 @@ export class CodexAppServerWire {
   /** Route one notification, buffering anything that precedes the turn id. */
   #handleNotification(method: string, params: unknown, order?: number): void {
     const fields = (params ?? {}) as Record0
+    if (order === undefined) this.#native?.observe(method, params)
     if (method === 'thread/tokenUsage/updated') {
       if (this.#threadId === undefined) {
         if (this.#earlyUsageNotifications.length < 128) {
@@ -1149,6 +1170,7 @@ export class CodexAppServerWire {
       const item = object(fields.item, 'item/completed item')
       if (this.#recordDeclinedItem(item, order)) return
       this.#recordImages(item)
+      if (item.type === 'exitedReviewMode' && typeof item.review === 'string') { this.#lastFinalAnswer = item.review; return }
       if (item.type !== 'agentMessage') {
         // Commands, file changes, and searches: the interesting part of a long run.
         this.#progress(describeItem(item))
