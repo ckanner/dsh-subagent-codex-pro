@@ -14,6 +14,8 @@
  * @module dsh-subagent-codex-pro/jsonrpc
  */
 
+import { OutputLimitError } from './output-limits.ts'
+
 /** One decoded JSON-RPC message. */
 export interface JsonRpcMessage {
   readonly jsonrpc?: string
@@ -78,7 +80,10 @@ interface Pending {
 export class LineTransport {
   #nextId = 1
   #pending = new Map<number | string, Pending>()
-  #buffer = ''
+  #frame: Buffer = Buffer.alloc(0)
+  #frameBytes = 0
+  #maxFrameBytes: number
+  #onLimit: ((error: OutputLimitError) => void) | undefined
   #disposed: Error | undefined
   // Explicit fields rather than constructor parameter properties: Node's native
   // TypeScript support strips types only, and rejects that syntax, so a source
@@ -87,12 +92,15 @@ export class LineTransport {
   readonly #fromPeer: TransportReadable
   #hooks: TransportHooks
 
-  constructor(toPeer: TransportWritable, fromPeer: TransportReadable, hooks: TransportHooks = {}) {
+  constructor(toPeer: TransportWritable, fromPeer: TransportReadable, hooks: TransportHooks = {},
+    limits: { maxFrameBytes?: number; onLimit?: (error: OutputLimitError) => void } = {}) {
+    this.#maxFrameBytes = limits.maxFrameBytes ?? 32 * 1024 * 1024
+    this.#onLimit = limits.onLimit
     this.#toPeer = toPeer
     this.#fromPeer = fromPeer
     this.#hooks = hooks
     fromPeer.on('data', (chunk) => {
-      this.#ingest(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
+      this.#ingest(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
     })
   }
 
@@ -194,6 +202,7 @@ export class LineTransport {
   dispose(reason = new Error('jsonrpc: transport disposed')): void {
     if (this.#disposed !== undefined) return
     this.#disposed = reason
+    this.#frame = Buffer.alloc(0); this.#frameBytes = 0
     const pending = [...this.#pending.values()]
     this.#pending.clear()
     for (const entry of pending) {
@@ -218,19 +227,44 @@ export class LineTransport {
   }
 
   /** Split one read chunk into lines and handle each complete one. */
-  #ingest(chunk: string): void {
-    this.#buffer += chunk
-    for (;;) {
-      const newline = this.#buffer.indexOf('\n')
-      if (newline < 0) break
-      const line = this.#buffer.slice(0, newline).trim()
-      this.#buffer = this.#buffer.slice(newline + 1)
+  #ingest(chunk: Buffer): void {
+    if (this.#disposed !== undefined) return
+    let offset = 0
+    while (offset < chunk.length && this.#disposed === undefined) {
+      const newline = chunk.indexOf(10, offset)
+      const end = newline < 0 ? chunk.length : newline
+      const fragment = chunk.subarray(offset, end)
+      if (this.#frameBytes + fragment.length > this.#maxFrameBytes) {
+        const failure = new OutputLimitError(`codex-pro: protocol frame exceeded ${this.#maxFrameBytes} bytes`)
+        this.#frame = Buffer.alloc(0); this.#frameBytes = 0
+        this.dispose(failure)
+        this.#onLimit?.(failure)
+        this.#hooks.onProblem?.(failure)
+        return
+      }
+      let line = ''
+      if (newline >= 0 && this.#frameBytes === 0) line = fragment.toString('utf8').trim()
+      else {
+        const size = this.#frameBytes + fragment.length
+        if (size > this.#frame.length) {
+          // A peer can split a frame at every byte. Grow one bounded buffer,
+          // not one Buffer object per fragment, so framing overhead stays bounded.
+          const expanded = Buffer.allocUnsafe(Math.min(this.#maxFrameBytes, Math.max(size, this.#frame.length * 2, 4096)))
+          this.#frame.copy(expanded, 0, 0, this.#frameBytes)
+          this.#frame = expanded
+        }
+        fragment.copy(this.#frame, this.#frameBytes)
+        this.#frameBytes = size
+        if (newline >= 0) line = this.#frame.toString('utf8', 0, this.#frameBytes).trim()
+      }
+      offset = end + 1
+      if (newline < 0) return
+      this.#frameBytes = 0
       if (line === '') continue
       let message: JsonRpcMessage
       try {
         message = JSON.parse(line) as JsonRpcMessage
       } catch (error: unknown) {
-        // One malformed frame is the peer's problem, not the session's.
         this.#hooks.onProblem?.(new Error(`jsonrpc: ignoring an undecodable line (${String(error)}): ${line.slice(0, 200)}`))
         continue
       }

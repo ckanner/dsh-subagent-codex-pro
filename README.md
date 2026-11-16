@@ -499,6 +499,10 @@ an honest name, and the Codex CLI lists the thread either way.
 
 Because the originator cannot say where a thread came from, a persistent one is named
 `DSH · <the call's description>` through `thread/name/set`, which is what a person sees in the list.
+Only new persistent threads are named; resuming never overwrites a title the user
+has edited. Names are normalized to one line and at most 160 Unicode characters.
+Direct desktop calls keep best-effort naming. The [machine API](docs/machine.md)
+requires a confirmed name write before dispatching a new persistent thread's task.
 
 **One thread carries one turn at a time.** Two delegations sent at once from the same session would both reach
 for the remembered thread, and the app-server refuses the second with `thread-store conflict: … already has an
@@ -608,3 +612,36 @@ Use the official provider when its configuration and result contract meet your
 needs. This package adds per-call configuration and a public machine receipt
 for external orchestrators. Its compatibility is checked against the documented
 DSH/Codex baselines; new upstream releases still require contract verification.
+
+## Provider activity and long streams (0.10.1 source candidate)
+
+The public [machine API](docs/machine.md#observed-activity-0101-source-candidate)
+now reports coalesced, metadata-only activity for the current root turn and its
+owned active children. Reasoning/text/command deltas no longer disappear at the
+adapter boundary. This is distinct from final answers, progress text and durable
+lifecycle acknowledgments. Quiet work produces no invented heartbeat, and the
+whole-run deadline and process-group cleanup remain enforced.
+
+Child ownership is observed even when no native profile is supplied and Codex
+uses its existing native-tool defaults. Observation does not add configuration
+overrides or fabricate a requested-native receipt; explicit native off is still
+enforced.
+
+`maxOutputBytes` separately bounds a protocol frame and retained result/ownership/
+usage evidence, rather than
+all bytes ever streamed. Valid long streams do not consume a cumulative 32 MiB
+allowance; oversized or unterminated frames and oversized retained results still
+fail conservatively. Stderr display is bounded and additional diagnostics are drained.
+
+For nested DSH execution, Flywheel may provide the optional Cordis service
+`flywheelProviderActivity` with `{version:1, intervalMs, report(agent,event)}`.
+The Host provider, foreground/PTC tools and background jobs pass their actual
+Agent object and the same safe activity event, extended with one per-call
+`invocationId`. The receiver verifies Agent ownership and lineage. This is an
+explicit Flywheel host extension, not a built-in DSH event or a synthetic model
+message. With no compatible service, ordinary DSH behavior is unchanged. The
+adapter stops reporting after cancellation/teardown and never copies reasoning
+or tool contents into this activity channel.
+
+These are source-candidate changes. Offline process/installed-package tests do
+not claim that this version is published or that a live desktop/account was tested.

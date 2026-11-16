@@ -1,5 +1,6 @@
 /** Versioned controls and evidence for Codex's native child threads. */
-import { TokenUsageTracker, type CodexUsageReport } from './usage.ts'
+import { snapshotTokenUsage, TokenUsageTracker, type CodexUsageReport } from './usage.ts'
+import { OutputLimitError } from './output-limits.ts'
 
 export const MACHINE_NATIVE_VERSION = 1 as const
 export const MACHINE_NATIVE_CAPABILITIES = Object.freeze({ version: 1, agents: true, review: true,
@@ -40,6 +41,29 @@ const object = (v: unknown): v is Record<string, unknown> => v !== null && typeo
 const text = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '' && !v.includes('\0') && Buffer.byteLength(v) <= 65536
 const keys = (v: Record<string, unknown>, allowed: string[]): boolean => Object.keys(v).every(k => allowed.includes(k))
 const terminalStates = new Set(['completed', 'failed', 'closed', 'shutdown', 'errored', 'interrupted', 'notFound'])
+const observationMethods = new Set(['thread/started', 'thread/closed', 'turn/started', 'turn/completed',
+  'thread/tokenUsage/updated', 'item/started', 'item/completed'])
+
+/** Creation cannot replace terminal evidence or work queued after that creation. */
+function acceptsCreationState(child: NativeChild, superseded: boolean): boolean {
+  return !superseded && child.turnId === null && !terminalStates.has(child.state)
+}
+
+/** Keep identity/counters only: thread history and tool contents are not ownership evidence. */
+function replayEvidence(method: string, params: Record<string, unknown>): Record<string, unknown> {
+  if (method === 'thread/tokenUsage/updated') return { ...snapshotTokenUsage(params) }
+  const scalar = (value: unknown): string | null => text(value) ? value : null
+  if (method === 'thread/started' && object(params.thread)) {
+    const t = params.thread
+    const source = object(t.source) ? t.source : object(t.sessionSource) ? t.sessionSource : undefined
+    const sub = source && object(source.subAgent) ? source.subAgent : source && object(source.subagent) ? source.subagent : undefined
+    const spawn = sub && object(sub.thread_spawn) ? sub.thread_spawn : sub && object(sub.threadSpawn) ? sub.threadSpawn : undefined
+    return { thread: { id: scalar(t.id), model: scalar(t.model),
+      parentThreadId: scalar(t.parentThreadId ?? spawn?.parent_thread_id ?? spawn?.parentThreadId) } }
+  }
+  const turn = object(params.turn) ? params.turn : {}
+  return { threadId: scalar(params.threadId), turn: { id: scalar(turn.id), status: scalar(turn.status) } }
+}
 
 /** Reject unsupported controls, instead of silently dropping a policy. */
 export function parseNativeRequest(value: unknown): NativeRequest {
@@ -84,10 +108,13 @@ export function nativeArguments(request: NativeRequest | undefined, review: { mo
 }
 
 /** Identity must be established by a parent relation, never by an arbitrary notification. */
-export class NativeTracker {
-  readonly request: NativeRequest
+export class NativeTracker<Request extends NativeRequest | undefined = NativeRequest> {
+  readonly request: Request
   #root: string | undefined
   #children = new Map<string, NativeChild>()
+  // Once superseded, creation stays historical even if later work is pending
+  // before the child listener supplies a new turn identity. Bounded by children.
+  #creationSuperseded = new Set<string>()
   #usage = new Map<string, TokenUsageTracker>()
   #fresh = new Set<string>()
   #turns = new Map<string, Set<string>>()
@@ -100,9 +127,28 @@ export class NativeTracker {
   #truncated = false
   #effective: NativeReceipt['effective'] = { source: null, matched: false, config: null }
   #report: ((event: NativeEvent) => void) | undefined
-  constructor(request: NativeRequest, report?: (event: NativeEvent) => void, review: { model?: string | undefined; effort?: string | undefined } = {}) { this.request = request; this.#report = report; this.#expected = nativeConfig(request, review) }
+  #maxRetainedBytes: number
+  #retainedBytes = 0
+  constructor(request: Request, report?: (event: NativeEvent) => void,
+    review: { model?: string | undefined; effort?: string | undefined } = {}, maxRetainedBytes = 32 * 1024 * 1024) {
+    this.request = request
+    this.#report = report
+    this.#maxRetainedBytes = maxRetainedBytes
+    // Observing default native tools does not request or verify new controls.
+    this.#expected = request === undefined ? {} : nativeConfig(request, review)
+  }
   get configurationOverrides(): Record<string, unknown> { return structuredClone(this.#expected) }
-  setRoot(id: string): void { this.#root = id; this.#replayOrphans() }
+  get retainedBytes(): number { return this.#retainedBytes }
+  #checkRetainedEvidence(): void {
+    this.#retainedBytes = Buffer.byteLength(JSON.stringify([this.#root, [...this.#children], [...this.#creationSuperseded], [...this.#fresh],
+      [...this.#turns].map(([id, turns]) => [id, [...turns]]), [...this.#history], this.#orphans,
+      this.#events, [...this.#seen], this.#effective, this.#expected]))
+      + [...this.#usage.values()].reduce((bytes, tracker) => bytes + tracker.retainedBytes, 0)
+    if (this.#retainedBytes > this.#maxRetainedBytes) {
+      throw new OutputLimitError(`codex-pro: retained native evidence exceeded ${this.#maxRetainedBytes} bytes`)
+    }
+  }
+  setRoot(id: string): void { this.#root = id; this.#replayOrphans(); this.#checkRetainedEvidence() }
   #replayOrphans(): void {
     const pending = this.#orphans.splice(0)
     for (const event of pending) this.observe(event.method, event.params)
@@ -119,17 +165,19 @@ export class NativeTracker {
     const matches = (a: unknown, b: unknown): boolean => object(a) && object(b) ? Object.entries(b).every(([k, v]) => matches(a[k], v)) : a === b
     let matched = Object.entries(expected).every(([k, v]) => matches(actual[k], v))
     const v2 = object(config?.features) ? config.features.multi_agent_v2 : undefined
-    if (this.request.agents?.enabled && object(v2) && v2.enabled !== false) {
+    if (this.request?.agents?.enabled && object(v2) && v2.enabled !== false) {
       if (v2.disable_native_tools === true) matched = false
       const cap = this.request.agents.maxConcurrentThreads
       if (cap !== undefined && typeof v2.max_concurrent_threads_per_session === 'number' && v2.max_concurrent_threads_per_session > cap + 1) matched = false
       actual['effectiveV2'] = v2
     }
     this.#effective = { source: 'config/read', matched, config: actual }
+    this.#checkRetainedEvidence()
     if (!matched) throw new Error('Codex did not confirm the requested native configuration before dispatch')
   }
   owns(id: unknown): boolean { return typeof id === 'string' && (id === this.#root || this.#children.has(id)) }
   #record(kind: string, child: NativeChild): void {
+    if (this.request === undefined) return
     const key = JSON.stringify([kind, child.id, child.parentId, child.state, child.turnId, child.model])
     if (this.#seen.has(key)) return
     if (this.#events.length >= 4096) { this.#truncated = true; return }
@@ -143,28 +191,41 @@ export class NativeTracker {
     const child = typeof id === 'string' ? this.#children.get(id) : undefined
     return child !== undefined && ((nullable && turnId === null) || (typeof turnId === 'string' && child.turnId === turnId))
   }
+  activeTurn(id: unknown, turnId: unknown): boolean {
+    const child = typeof id === 'string' ? this.#children.get(id) : undefined
+    return child?.state === 'running' && child.turnId !== null && child.turnId === turnId
+  }
   #child(id: unknown, parent: unknown, kind = 'agent', fresh = false): NativeChild | undefined {
     if (!text(id) || id === this.#root || !this.owns(parent)) return undefined
     const existing = this.#children.get(id)
     if (existing) {
-      if (fresh && !this.#fresh.has(id)) {
+      if (this.request !== undefined && fresh && !this.#fresh.has(id)) {
         this.#fresh.add(id)
         const tracker = new TokenUsageTracker(); tracker.resetForNewThread(id); this.#usage.set(id, tracker)
         for (const event of this.#history.get(id) ?? []) this.#foldUsage(existing, event.method, event.params)
+        this.#history.delete(id)
       }
       return existing
     }
     if (this.#children.size >= 4096) throw new Error('native child evidence exceeds its bounded ledger')
-    if (this.request.agents?.enabled !== true) throw new Error('native child dispatch was observed while agents were disabled')
+    if (this.request !== undefined && this.request.agents?.enabled !== true) throw new Error('native child dispatch was observed while agents were disabled')
     const child: NativeChild = { id, parentId: String(parent), kind, state: 'created', model: null, turnId: null, usage: null }
     this.#children.set(id, child)
-    const tracker = new TokenUsageTracker(); if (fresh) { tracker.resetForNewThread(id); this.#fresh.add(id) } else tracker.resetForResume(id); this.#usage.set(id, tracker)
+    if (this.request !== undefined) {
+      const tracker = new TokenUsageTracker(); if (fresh) { tracker.resetForNewThread(id); this.#fresh.add(id) } else tracker.resetForResume(id); this.#usage.set(id, tracker)
+    }
     this.#record('child-created', child)
     this.#replayOrphans()
     return child
   }
-  observe(method: string, params: unknown): void {
-    if (!object(params)) return
+  observe(method: string, params: unknown): boolean {
+    if (!object(params) || !observationMethods.has(method)) return false
+    if (this.request === undefined && method === 'thread/tokenUsage/updated') return false
+    this.#observe(method, params)
+    this.#checkRetainedEvidence()
+    return true
+  }
+  #observe(method: string, params: Record<string, unknown>): void {
     if (method === 'thread/started' && object(params.thread)) {
       const t = params.thread
       const source = object(t.source) ? t.source : object(t.sessionSource) ? t.sessionSource : undefined
@@ -175,6 +236,7 @@ export class NativeTracker {
     }
     const item = object(params.item) ? params.item : undefined
     if (item && (item.type === 'collabAgentToolCall' || item.type === 'collaborationToolCall')) {
+      if (item.senderThreadId !== undefined && item.senderThreadId !== params.threadId) return
       const parent = item.senderThreadId ?? params.threadId
       if (!this.owns(parent)) return
       const ids = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []
@@ -183,7 +245,12 @@ export class NativeTracker {
         if (!child) continue
         const states = object(item.agentsStates) ? item.agentsStates : undefined
         const state: Record<string, unknown> | undefined = states && object(states[child.id]) ? states[child.id] as Record<string, unknown> : undefined
-        if (state && text(state.status)) child.state = state.status
+        // A spawn snapshot describes creation, not a later child turn. Other
+        // tools (sendInput/followupTask) can still report newly queued work.
+        if (state && text(state.status) && (item.tool !== 'spawnAgent' || acceptsCreationState(child, this.#creationSuperseded.has(child.id)))) {
+          child.state = state.status
+          if (item.tool !== 'spawnAgent' || terminalStates.has(child.state)) this.#creationSuperseded.add(child.id)
+        }
         if (text(item.model)) child.model = item.model
         this.#record('child-state', child)
       }
@@ -192,7 +259,11 @@ export class NativeTracker {
       const child = this.#child(item.agentThreadId, params.threadId, 'agent', item.kind === 'started')
       if (child) {
         if (text(item.model)) child.model = item.model
-        if (text(item.kind)) child.state = item.kind === 'started' ? 'running' : item.kind
+        // v2's started activity is emitted by spawn, not by each child turn.
+        if (text(item.kind) && (item.kind !== 'started' || acceptsCreationState(child, this.#creationSuperseded.has(child.id)))) {
+          child.state = item.kind === 'started' ? 'running' : item.kind
+          if (item.kind !== 'started') this.#creationSuperseded.add(child.id)
+        }
         this.#record('child-activity', child)
       }
     }
@@ -203,7 +274,7 @@ export class NativeTracker {
       // evidence so later child requests can be routed to the correct turn.
       const id = method === 'thread/started' && object(params.thread) ? params.thread.id : params.threadId
       if (text(id) && id !== this.#root && ['thread/tokenUsage/updated', 'turn/started', 'turn/completed', 'thread/started'].includes(method)) {
-        if (this.#orphans.length < 128) this.#orphans.push({ method, params })
+        if (this.#orphans.length < 128) this.#orphans.push({ method, params: replayEvidence(method, params) })
         else this.#truncated = true
       }
       return
@@ -214,10 +285,10 @@ export class NativeTracker {
       if (turns.size >= 4096) { this.#truncated = true; return }
       turns.add(params.turn.id); this.#turns.set(child.id, turns)
     }
-    if (['thread/tokenUsage/updated', 'turn/started'].includes(method)) {
+    if (this.request !== undefined && !this.#fresh.has(child.id) && ['thread/tokenUsage/updated', 'turn/started'].includes(method)) {
       const history = this.#history.get(child.id) ?? []
-      if (history.length < 128) { history.push({ method, params }); this.#history.set(child.id, history) }
-      else if (!this.#fresh.has(child.id)) this.#truncated = true
+      if (history.length < 128) { history.push({ method, params: replayEvidence(method, params) }); this.#history.set(child.id, history) }
+      else this.#truncated = true
     }
     this.#foldUsage(child, method, params)
     if (method === 'turn/started' && object(params.turn) && text(params.turn.id)) {
@@ -242,6 +313,7 @@ export class NativeTracker {
     return [...this.#children.values()].filter(c => c.state === 'running' && c.turnId !== null).map(c => ({ threadId: c.id, turnId: c.turnId! }))
   }
   report(cleanupConfirmed = false): NativeReceipt {
+    if (this.request === undefined) throw new Error('observed child ownership has no requested native policy receipt')
     const usage: Record<string, CodexUsageReport> = {}
     for (const [id, tracker] of this.#usage) {
       const report = tracker.report()

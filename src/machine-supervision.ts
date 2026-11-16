@@ -2,6 +2,7 @@
 import { fork } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { validActivity } from './activity.ts'
 import type { NativeEvent } from './native.ts'
 import type { MachineOptions, MachineReceipt, MachineRequest } from './machine.ts'
 import { validLifecycle } from './machine-recovery.ts'
@@ -9,6 +10,7 @@ import { validLifecycle } from './machine-recovery.ts'
 export interface MachineHostOptions {
   readonly env: Readonly<Record<string, string | undefined>>
   readonly recoveryDirectory?: string
+  readonly activityIntervalMs?: number
 }
 
 /** This promise rejects on incomplete evidence; it never fabricates a successful receipt. */
@@ -19,7 +21,7 @@ export async function superviseMachine(request: MachineRequest, options: Machine
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'], env: {},
   })
   let settled = false, ready = false, receipt: MachineReceipt | undefined, failure: Error | undefined
-  let lastSequence = 0
+  let lastSequence = 0, lastActivitySequence = 0
   let exitDrain: NodeJS.Timeout | undefined
   let resolveClosed: () => void
   const closed = new Promise<void>(resolve => { resolveClosed = resolve })
@@ -66,7 +68,7 @@ export async function superviseMachine(request: MachineRequest, options: Machine
       ready = true
       clearTimeout(admissionTimer)
       const env = { ...process.env, ...options.env }
-      send({ type: 'start', request, options: { env,
+      send({ type: 'start', request, options: { env, activityIntervalMs: options.activityIntervalMs,
         ...(options.recoveryDirectory === undefined ? {} : { recoveryDirectory: options.recoveryDirectory }) } })
       if (options.signal?.aborted === true) cancel()
       return
@@ -86,6 +88,10 @@ export async function superviseMachine(request: MachineRequest, options: Machine
       )
     } else if (message.type === 'progress' && typeof message.text === 'string') {
       try { options.onProgress?.(message.text) } catch { /* Progress is display-only. */ }
+    } else if (message.type === 'activity') {
+      if (!validActivity(message.event) || message.event.sequence <= lastActivitySequence) { invalid('invalid provider activity'); return }
+      lastActivitySequence = message.event.sequence
+      if (!options.signal?.aborted) { try { options.onActivity?.(message.event) } catch { /* Observation is not an ACK. */ } }
     } else if (message.type === 'native-event') {
       const event = message.event as NativeEvent
       if (event?.version !== 1 || !Number.isSafeInteger(event.sequence) || typeof event.id !== 'string') { invalid('invalid native event'); return }

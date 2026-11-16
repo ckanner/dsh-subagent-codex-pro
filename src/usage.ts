@@ -117,6 +117,19 @@ function normalizeBreakdown(value: unknown): TokenUsageBreakdown | undefined {
   }
 }
 
+/** Copy only accounting evidence; stream payload extensions must not enter replay buffers. */
+export function snapshotTokenUsage(notification: TokenUsageNotificationLike): TokenUsageNotificationLike {
+  const usage = notification.tokenUsage !== null && typeof notification.tokenUsage === 'object'
+    && !Array.isArray(notification.tokenUsage) ? notification.tokenUsage as Record<string, unknown> : undefined
+  const window = usage?.modelContextWindow
+  return {
+    threadId: typeof notification.threadId === 'string' ? notification.threadId : null,
+    turnId: typeof notification.turnId === 'string' ? notification.turnId : null,
+    tokenUsage: usage === undefined ? null : { total: normalizeBreakdown(usage.total) ?? null,
+      ...(window === null || count(window) ? { modelContextWindow: window } : {}) },
+  }
+}
+
 /** Subtract one breakdown from another; returns undefined when any field goes backwards. */
 function subtract(later: TokenUsageBreakdown, earlier: TokenUsageBreakdown): TokenUsageBreakdown | undefined {
   const result = {
@@ -246,6 +259,12 @@ export class TokenUsageTracker {
     return this.#modelContextWindow
   }
 
+  /** Serialized accounting evidence retained across an incomplete start handshake. */
+  get retainedBytes(): number {
+    return Buffer.byteLength(JSON.stringify([this.#pending, this.#threadId, this.#turnId,
+      this.#baseline, this.#highWater, this.report()]))
+  }
+
   /** Begin a report's closing fold; further observations are ignored. */
   close(): void {
     this.#state = 'closed'
@@ -269,7 +288,7 @@ export class TokenUsageTracker {
     // turn/start. Buffer this bounded window rather than mistaking live usage
     // for a resumed thread's history or attributing an unrelated turn to ours.
     if (this.#awaitingTurnId) {
-      if (this.#pending.length < 128) this.#pending.push(notification)
+      if (this.#pending.length < 128) this.#pending.push(snapshotTokenUsage(notification))
       else {
         this.#invalid = true
         this.#reason = 'too many usage notifications arrived before the turn id was confirmed'

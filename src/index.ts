@@ -40,6 +40,8 @@ import { appendFileSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { hostActivity } from './host-activity.ts'
+import { readableThreadName } from './thread-name.ts'
 
 import type {
   AgentLike,
@@ -402,9 +404,13 @@ export class CodexExecProvider implements SubagentProviderLike {
    */
   readonly resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode'>> & Config
 
+  readonly activityHost: Pick<Context, 'get'> | undefined
+
   constructor(
     resolved: Required<Pick<Config, 'command' | 'providerName' | 'permissionMode'>> & Config,
+    activityHost?: Pick<Context, 'get'>,
   ) {
+    this.activityHost = activityHost
     this.resolved = resolved
     this.name = resolved.providerName
   }
@@ -443,6 +449,8 @@ export class CodexExecProvider implements SubagentProviderLike {
     const effort = options?.reasoningEffort ?? this.resolved.reasoningEffort
     const native = readNativeDefault(this.resolved.native)
     const spec: CodexRunSpec = {
+      ...hostActivity(this.activityHost, request.parent, request.signal),
+      threadName: threadNameFor(request.label ?? 'Codex delegation'),
       ...(native === undefined ? {} : { native }),
       cwd,
       command: this.resolved.command,
@@ -537,7 +545,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const presets = config.presets ?? ['codexprobe']
 
   try {
-    ctx.subagents.registerProvider(new CodexExecProvider(resolved))
+    ctx.subagents.registerProvider(new CodexExecProvider(resolved, ctx))
     diag(`apply: v${PLUGIN_VERSION} provider "${resolved.providerName}" registered with agentOptions: true `
       + `(efforts: ${KNOWN_EFFORTS.join('/')}, permission=${resolved.permissionMode}); `
       + `threadMode=${resolved.threadMode} originator=${JSON.stringify(resolved.originator)} `
@@ -831,6 +839,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // Claim the thread for the whole call, so a concurrent delegation sees it
       // as busy before it tries rather than failing when it does.
       if (reuse !== undefined) inFlight.add(reuse)
+      const activity = hostActivity(ctx, agent, signal)
       try {
         const outcome = await delegateOnce({
           prompt: call.prompt,
@@ -852,6 +861,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           signal,
           onStart: (id) => { diag(`run: published ${id}`) },
           onProgress,
+          ...activity,
         })
         if (mode === 'persistent' && outcome.threadId !== undefined) {
           sessionThread.set(String(agent.id), { id: outcome.threadId, binding })
@@ -918,6 +928,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             signal,
             onStart: (id) => { diag(`run: published ${id}`) },
             onProgress,
+          ...activity,
           })
           if (outcome.threadId !== undefined) sessionThread.set(String(agent.id), { id: outcome.threadId, binding })
           diag(`run done: text=${String(outcome.text.length)}B thread=${outcome.threadId ?? '<none>'} `
@@ -1034,5 +1045,5 @@ export function withThreadMarker(
  */
 function threadNameFor(label: string): string {
   const trimmed = label.trim()
-  return trimmed === '' ? 'DSH · Codex delegation' : `DSH · ${trimmed}`
+  return readableThreadName(trimmed === '' ? 'DSH · Codex delegation' : `DSH · ${trimmed}`, '')
 }

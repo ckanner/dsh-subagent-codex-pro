@@ -23,6 +23,7 @@ function harness(t: { after(fn: () => void): void }, extra: PluginConfig = {}, m
   const registered = new Map<string, ToolDefinitionLike>()
   const listeners = new Map<string, Function>()
   const jobs: ReturnType<JobSpecLike['run']>[] = []
+  const activity: { agent: unknown; event: any }[] = []
   let provider: CodexExecProvider
   const agent = { id: 'desktop-agent', session: { header: { cwd, agentPreset: 'test' } },
     ctx: { tools: { register(tool: ToolDefinitionLike) {
@@ -32,6 +33,7 @@ function harness(t: { after(fn: () => void): void }, extra: PluginConfig = {}, m
       systemPrompt: { section() { return () => {} } } } }
   const context = {
     get(name: string) {
+      if (name === 'flywheelProviderActivity') return { version: 1, intervalMs: 30, report(owner: unknown, event: unknown) { activity.push({ agent: owner, event }) } }
       if (name === 'jobs' && background) return { start(spec: JobSpecLike) {
         jobs.push(spec.run({ append() {}, updateProgress() {} })); return 'job-' + jobs.length
       } }
@@ -55,7 +57,7 @@ function harness(t: { after(fn: () => void): void }, extra: PluginConfig = {}, m
     assert.deepEqual(validateJsonSchemaValue(tool.output.schema, result), [])
     return result
   }
-  return { cwd, agent, registered, provider: provider!, jobs, messages, call }
+  return { cwd, agent, registered, provider: provider!, jobs, messages, call, activity }
 }
 
 test('real Config schema preserves absent/null inheritance and rejects invalid native settings before save', () => {
@@ -282,4 +284,32 @@ test('desktop native mismatch rejects before thread dispatch and retains startup
     return true
   })
   assert.equal(h.messages().some(m => ['thread/start', 'thread/resume', 'turn/start', 'review/start'].includes(m.method)), false)
+})
+
+for (const native of [undefined, enabled]) for (const path of ['provider', 'foreground', 'background']) test(`real ${path} delegation relays owned child activity with ${native ? 'explicit' : 'default'} native tools`, async t => {
+  const h = harness(t, native === undefined ? {} : { native }, 'activity-child', true)
+  if (path === 'provider') {
+    const run = await h.provider.start({ parent: h.agent, prompt: [{ type: 'text', text: 'private task' }], signal: signal() })
+    assert.equal((await run.result).stopReason, 'completed')
+    await run.dispose()
+  } else {
+    await h.call({ run_in_background: path === 'background' })
+    if (path === 'background') assert.equal((await h.jobs[0]!.done).status, 'completed')
+  }
+  assert.ok(h.activity.length >= 3)
+  assert.ok(h.activity.every(x => x.agent === h.agent && x.event.source === 'codex-pro'))
+  assert.ok(h.activity.some(x => x.event.eventTypes.includes('item/reasoning/summaryTextDelta')))
+  assert.equal(new Set(h.activity.map(x => x.event.invocationId)).size, 1)
+  assert.ok(h.activity.every((x, i) => x.event.sequence === i + 1))
+  assert.equal(JSON.stringify(h.activity.map(x => x.event)).includes('PRIVATE_REASONING'), false)
+  if (native === undefined) assert.equal(h.messages().some(m => m.method === 'config/read'), false)
+})
+
+test('desktop persistent task labels are readable and resuming never overwrites the initial title', async t => {
+  const h = harness(t, { threadMode: 'session' })
+  await h.call({ description: 'Investigate alert latency' })
+  await h.call({ description: 'A later instruction must not rename it' })
+  const names = h.messages().filter(m => m.method === 'thread/name/set')
+  assert.equal(names.length, 1)
+  assert.equal(names[0].params.name, 'DSH · Investigate alert latency')
 })

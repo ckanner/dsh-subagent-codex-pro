@@ -312,7 +312,7 @@ apply: v0.7.0 provider "codex-pro" registered … timeout=5400000ms; presets=["d
 
 **有两件事由 app-server 决定，都是实测出来的。** 还没跑过 turn 的 thread **无法续接** —— 它会回 `no rollout found` —— 所以一条 thread 只有在完成第一次 turn 之后才可续接。另外，**Codex 应用只在 originator 恰好是 `Codex Desktop` 时才会列出该 thread**，那是它客户端过滤用的唯一取值；`originator` 就是设置它的，默认即该字面量。改成别的值就是用**应用内可见性**换一个**诚实的名字**，而 Codex CLI 两种情况都能列出。
 
-因为 originator 没法说明 thread 来自哪里，持久 thread 会通过 `thread/name/set` 命名为 `DSH · <本次调用的描述>` —— 这才是人在列表里看到的内容。
+因为 originator 无法说明 thread 来自哪里，新建的持久 thread 通过 `thread/name/set` 命名为 `DSH · <本次调用的描述>`。名称规范化为一行、最多 160 个 Unicode 字符；续接时不重新命名，以保留用户修改的标题。桌面直接调用保持尽力命名；下文 machine API 对新持久线程要求在派发任务前确认名称写入。
 
 **一条 thread 同时只能承载一个 turn。** 同一会话同时发出的两条委派会都去争那条被记住的 thread，app-server 会以 `thread-store conflict: … already has an active writer` 拒绝第二条。所以 `session` 模式下的调用会**先检查**：若那条被记住的 thread 正被另一个委派使用，就跳过它，本次调用另起一条，并把这次跳过**写进日志**。并行工作照常进行 —— 只是不再共用一段对话，而这正是 `persistent` 本来的行为，于是该模式**退化为支持这种工作形态的那个模式**。要**顺序执行并让对话延续**就选 `session`；要**同时跑多条委派**就选 `persistent` 或 `ephemeral`。
 
@@ -400,3 +400,50 @@ Codex 通过 `thread/tokenUsage/updated` 报告线程累计的 `total` 和最近
 上面那三项拒绝**不是待补的缺口**。一次 Codex 委派是**叶子**：它**没有 DSH 子 agent**，所以"委派深度上限"没有东西可限。它的工具是 **Codex 自己的** —— shell、patch 工具、它自己的 MCP —— **不是本 harness 的**，而 **tool filter** 描述的是 DSH 工具，因此无从表达它们；要限制 Codex 请用它自己的配置。而 **persona** 是给子 agent 的系统指令，这里任务已经通过 `prompt` 给出。把任何一项声明成 `true`，都等于向 harness 承诺一个并不存在的强制力。
 
 官方 provider 的配置与结果契约满足需求时，可以直接使用官方版本。本包增加逐调用模型与思考等级配置，并给外部编排器提供公开 machine 收据。兼容性按文档列明的 DSH/Codex 基线核验；上游更新后仍需重新验证协议契约。
+
+## Provider 活动与长流（0.10.1 源码候选）
+
+即使没有配置 native profile，Codex 原有默认配置启动的子线程也会按真实归属观察。
+这不会额外发送配置、启用原生能力，或伪造 requested-native 回执；显式关闭 native
+时仍执行原有配置核验与禁用约束。
+
+公开 machine API 新增 `MACHINE_ACTIVITY_VERSION=1`、能力声明和
+`onActivity(event)`。`activityIntervalMs` 为 1–60000 的整数，默认 250ms；
+同一个合并器覆盖根线程和已归属且仍活动的子线程。正文、思考、命令输出等真实
+事件只转为安全元信息，包含 version、单调 sequence、kind、source、scope、
+有限 eventTypes 与 observedEvents；不转发 prompt、思考正文、命令、参数、路径或
+线程 ID。`ACTIVITY_EVENT_TYPES` 导出精确允许列表。外部线程、旧 turn 和已完成
+子线程不能刷新当前调用活性。只有实际新事件触发回调，没有定时心跳；真实静默
+仍然静默，调用总期限和进程组清理保持生效。
+
+活动回调与 `onProgress` 展示文字、持久化 lifecycle ACK、usage 和恢复回执分离。
+独立 machine supervisor 会转发活动，但活动本身不授权派发、不确认完成，CLI
+仍只输出终态单文档。
+
+`maxOutputBytes` 分别限制单个 JSONL 帧，以及实际保留的答案／图片／提前到达消息、
+原生归属账本和 usage 证据，默认各 32MiB。这不是仅最终答案的限额，也不把已经
+丢弃的历史元数据再次计费。原生重放只保留身份与数字计数，不缓存完整线程历史或
+任意扩展正文；未配置 native profile 时仅保存归属账本，不额外建立原生回执历史。
+逐字节切分的 JSONL 使用单个有界增长缓冲。已经解析的增量流不累计消耗这个额度。
+正常长流可以超过 32MiB，超大或
+缺换行的帧、保留结果超限仍返回 truncated 失败。stderr 最多转发展示额度与
+64KiB 中较小值，额外诊断继续排空，不因此取消有用工作。
+
+嵌套 DSH 调用使用显式可选 Cordis 扩展服务 `flywheelProviderActivity`，接口为
+`{version:1, intervalMs, report(agent,event)}`。Host provider、前台／PTC 工具和
+后台 job 都传真实 Agent 对象及同样的活动元信息，另带本次唯一 invocationId；
+宿主校验 Agent 注册与归属。它是 Flywheel 的版本化扩展，**不是虚构的 DSH
+内建事件或模型输出**。没有兼容服务时，普通 DSH 行为不变。
+
+machine 请求可传 `threadName` 为新持久线程命名，输入须为非空单行、最多
+1024 字节，展示最多 160 个 Unicode 字符；省略时使用
+`DSH · <工作区目录名> · Codex delegation`，不会把完整 prompt 用作标题。
+resume 不覆盖已有标题，ephemeral 不因此变为 persistent。
+machine 新建持久线程时，包括使用默认标题的情况，必须先确认名称写入，才会
+发送 `thread-ready` 或任务 prompt。写入未确认时，回执在 `thread-name` 阶段
+失败，`execution.dispatch` 为 `not-dispatched`，保留已知 thread ID 与独立
+确认的进程清理证据。只读恢复返回同一失败回执，不重试命名或任务；仅创建了
+空线程不代表其已经可续接。桌面直接调用保持原有尽力命名行为。
+
+本节描述源码候选；离线公开接口和安装包测试不等于 npm 已发布，也不代表真实
+模型、账号或桌面 UI 已验收。详细接口见 [Machine API](machine.md)。

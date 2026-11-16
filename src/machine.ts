@@ -1,4 +1,7 @@
 /** Versioned, host-independent entry point for deterministic orchestrators. */
+import { activityInterval, type ActivityEvent } from './activity.ts'
+export { MACHINE_ACTIVITY_VERSION, MACHINE_ACTIVITY_CAPABILITIES, ACTIVITY_EVENT_TYPES } from './activity.ts'
+export type { ActivityEvent } from './activity.ts'
 import { parseNativeRequest, type NativeRequest, type NativeReceipt, type NativeEvent } from './native.ts'
 export { MACHINE_NATIVE_VERSION, MACHINE_NATIVE_CAPABILITIES } from './native.ts'
 export type { NativeRequest, NativeReceipt, NativeEvent } from './native.ts'
@@ -27,6 +30,8 @@ export interface MachineRequest {
   readonly maxOutputBytes?: number
   readonly threadMode?: 'ephemeral' | 'persistent'
   readonly threadId?: string
+  /** Applied only when creating a new persistent thread; resume preserves its title. */
+  readonly threadName?: string
   readonly images?: readonly string[]
   readonly outputSchema?: Record<string, unknown>
   readonly native?: NativeRequest
@@ -36,6 +41,8 @@ export interface MachineOptions {
   readonly signal?: AbortSignal
   readonly env?: Readonly<Record<string, string>>
   readonly onProgress?: (text: string) => void
+  readonly onActivity?: (event: ActivityEvent) => void
+  readonly activityIntervalMs?: number
   readonly onNativeEvent?: (event: NativeEvent) => void
   /** Returning resolves the caller's durable checkpoint ACK. Rejection stops dispatch. */
   readonly onLifecycle?: (event: MachineLifecycleEvent) => Promise<void> | void
@@ -81,7 +88,7 @@ export class MachineInputError extends Error {
 
 const INPUT_KEYS = new Set([
   'protocol', 'requestId', 'prompt', 'cwd', 'model', 'effort', 'permissionMode',
-  'command', 'timeoutMs', 'maxOutputBytes', 'threadMode', 'threadId', 'images', 'outputSchema', 'native',
+  'command', 'timeoutMs', 'maxOutputBytes', 'threadMode', 'threadId', 'threadName', 'images', 'outputSchema', 'native',
 ])
 
 function textField(input: Record<string, unknown>, key: string, optional = false): void {
@@ -102,7 +109,8 @@ export function parseMachineRequest(value: unknown): MachineRequest {
   if (Object.keys(input).some((key) => !INPUT_KEYS.has(key))) throw new MachineInputError('request contains an unsupported field')
   if (input.protocol !== MACHINE_PROTOCOL_VERSION) throw new MachineInputError('unsupported machine protocol version')
   for (const key of ['requestId', 'prompt', 'cwd', 'model', 'effort']) textField(input, key)
-  for (const key of ['command', 'threadId']) textField(input, key, true)
+  for (const key of ['command', 'threadId', 'threadName']) textField(input, key, true)
+  if (input.threadName !== undefined && (Buffer.byteLength(input.threadName as string) > 1024 || /[\u0000-\u001f\u007f]/u.test(input.threadName as string))) throw new MachineInputError('threadName must be a readable single-line title of at most 1024 bytes')
   if (!isAbsolute(input.cwd as string)) throw new MachineInputError('cwd must be absolute')
   if (typeof input.permissionMode !== 'string'
     || !['read-only', 'workspace-write', 'dangerously-bypass-approvals-and-sandbox'].includes(input.permissionMode)) {
@@ -147,11 +155,13 @@ export async function runMachine(value: MachineRequest, options: MachineOptions 
   const request = parseMachineRequest(value)
   if (process.platform === 'win32') throw new MachineInputError('machine execution requires POSIX process-group supervision')
   if (options === null || typeof options !== 'object' || Array.isArray(options)
-    || Object.keys(options).some(key => !['signal', 'env', 'onProgress', 'onNativeEvent', 'onLifecycle', 'recoveryDirectory'].includes(key))) {
+    || Object.keys(options).some(key => !['signal', 'env', 'onProgress', 'onActivity', 'activityIntervalMs', 'onNativeEvent', 'onLifecycle', 'recoveryDirectory'].includes(key))) {
     throw new MachineInputError('machine options contain unsupported fields')
   }
   if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw new MachineInputError('signal must be an AbortSignal')
   if (options.onProgress !== undefined && typeof options.onProgress !== 'function') throw new MachineInputError('onProgress must be a function')
+  try { activityInterval(options.activityIntervalMs) } catch (error) { throw new MachineInputError((error as Error).message) }
+  if (options.onActivity !== undefined && typeof options.onActivity !== 'function') throw new MachineInputError('onActivity must be a function')
   if (options.onNativeEvent !== undefined && typeof options.onNativeEvent !== 'function') throw new MachineInputError('onNativeEvent must be a function')
   if (options.env !== undefined && (options.env === null || typeof options.env !== 'object' || Array.isArray(options.env)
     || Object.values(options.env).some(value => value !== undefined && (typeof value !== 'string' || value.includes('\0'))))) {

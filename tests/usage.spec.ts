@@ -43,6 +43,19 @@ function usage(total: number, extra: Partial<Record<'inputTokens' | 'cachedInput
 
 const note = (turnId: string, total: number) => ({ turnId, tokenUsage: usage(total), threadId: 'thread-1' })
 
+test('pre-response accounting snapshots discard unrelated payloads and preserve observed counters', () => {
+  const tracker = new TokenUsageTracker()
+  tracker.resetForNewThread('thread-1')
+  tracker.startTurnRequest()
+  const payload = { ...usage(100), extra: 'PRIVATE_PAYLOAD'.repeat(100_000) }
+  tracker.observe({ threadId: 'thread-1', turnId: 'turn-1', tokenUsage: payload })
+  assert.ok(tracker.retainedBytes < 4096)
+  payload.total.totalTokens = 9000
+  tracker.beginTurn('turn-1')
+  assert.equal(tracker.report().run?.totalTokens, 100)
+  assert.equal(tracker.report().status, 'complete')
+})
+
 test('a brand-new thread starts from a known zero baseline', () => {
   const tracker = new TokenUsageTracker()
   tracker.resetForNewThread('thread-1')

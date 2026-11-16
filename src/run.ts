@@ -15,6 +15,9 @@
  * @module dsh-subagent-codex-pro/run
  */
 
+import { activityInterval, type ActivityEvent } from './activity.ts'
+import { OutputLimitError } from './output-limits.ts'
+import { readableThreadName } from './thread-name.ts'
 import { nativeArguments, type NativeRequest, type NativeReceipt, type NativeEvent } from './native.ts'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -152,14 +155,22 @@ export interface CodexRunSpec {
    * appear in.
    */
   readonly threadName?: string | undefined
+  /**
+   * Require a fresh persistent thread's name before publishing or dispatching,
+   * using the workspace fallback when no explicit name is supplied.
+   * Machine callers enable this; existing direct callers remain best-effort.
+   */
+  readonly requireThreadName?: boolean | undefined
   /** Extra environment entries. */
   readonly env?: Readonly<Record<string, string>> | undefined
   /** Grace between termination tiers. */
   readonly disposeGraceMs?: number | undefined
-  /** Maximum stdout/stderr bytes before a non-successful, truncated result. */
+  /** Per-frame and retained answer/image limit; never a cumulative traffic budget. */
   readonly maxOutputBytes?: number | undefined
   /** Narrates notable child activity, for a caller that reports progress. */
   readonly onProgress?: ((text: string) => void) | undefined
+  readonly onActivity?: ((event: ActivityEvent) => void) | undefined
+  readonly activityIntervalMs?: number | undefined
   /** Awaitable structured persistence barriers, independent from progress text. */
   readonly onLifecycle?: ((event: CodexRunLifecycle) => Promise<void> | void) | undefined
 }
@@ -666,6 +677,7 @@ export async function startCodexRun(
   let texts: string[]
   try {
     texts = textTask(prompt)
+    activityInterval(spec.activityIntervalMs)
     if (!Number.isSafeInteger(graceMs) || graceMs < 0 || graceMs > 30_000) {
       throw new Error('disposeGraceMs must be an integer between 0 and 30000')
     }
@@ -703,24 +715,23 @@ export async function startCodexRun(
   }
 
   const runAbort = new AbortController()
-  let outputBytes = 0
-  const limitOutput = (chunk: Buffer | string): void => {
-    outputBytes += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.byteLength
-    if (outputBytes <= maxOutputBytes || truncated) return
+  const limitOutput = (error: OutputLimitError): void => {
+    if (truncated) return
     truncated = true
-    runAbort.abort(new Error(`codex-pro: output exceeded ${String(maxOutputBytes)} bytes`))
+    runAbort.abort(error)
     child.proc.stdout.destroy()
     child.proc.stderr.destroy()
   }
-  child.proc.stdout.on('data', limitOutput)
-  child.proc.stderr.on('data', limitOutput)
-  const transport = new LineTransport(child.proc.stdin, child.proc.stdout)
+  const transport = new LineTransport(child.proc.stdin, child.proc.stdout, {}, { maxFrameBytes: maxOutputBytes, onLimit: limitOutput })
   const wire = new CodexAppServerWire(
     child.proc.stdout,
     child.proc.stdin,
     transport,
     {
       permissionMode: spec.permissionMode,
+      maxRetainedBytes: maxOutputBytes, onOutputLimit: limitOutput,
+      activityIntervalMs: spec.activityIntervalMs,
+      onActivity: event => { if (!runAbort.signal.aborted && !signal.aborted) spec.onActivity?.(event) },
       native: spec.native, onNativeEvent: spec.onNativeEvent, nativeCwd: spec.cwd, nativeReviewEffort: spec.effort ?? spec.reasoningEffort,
       model: spec.model,
       threadMode: spec.threadMode,
@@ -729,10 +740,14 @@ export async function startCodexRun(
   )
   observedWire = wire
   if (spec.onProgress !== undefined) wire.setProgressReporter(spec.onProgress)
+  let stderrForwarded = 0
   const forwardStderr = (chunk: Buffer | string): void => {
     if (truncated) return
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+    const retained = bytes.subarray(0, Math.max(0, Math.min(maxOutputBytes, 64 * 1024) - stderrForwarded))
+    stderrForwarded += retained.length
     try {
-      process.stderr.write(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
+      if (retained.length > 0) process.stderr.write(retained)
     } catch {
       // Diagnostics must never take the run down.
     }
@@ -773,8 +788,6 @@ export async function startCodexRun(
     if (!cleanup.confirmed) child.releaseUnconfirmed()
     signal.removeEventListener('abort', onCallerAbort)
     child.proc.stderr.off('data', forwardStderr)
-    child.proc.stdout.off('data', limitOutput)
-    child.proc.stderr.off('data', limitOutput)
     return cleanup
   }
   let tornDown: Promise<CleanupReport> | undefined
@@ -817,12 +830,17 @@ export async function startCodexRun(
     // A persistent thread is named so the Codex application's list says where it
     // came from; the id alone cannot, because the originator has to be the value
     // that client filters on.
-    if (spec.threadMode === 'persistent' && spec.threadName !== undefined) {
+    if (spec.threadMode === 'persistent' && spec.resumeThreadId === undefined
+        && (spec.threadName !== undefined || spec.requireThreadName === true)) {
       startupStage = 'thread-name'
-      await Promise.race([wire.setThreadName(spec.threadName, runAbort.signal), processFailure])
+      const named = await Promise.race([wire.setThreadName(readableThreadName(spec.threadName, spec.cwd), runAbort.signal), processFailure])
+      if (spec.requireThreadName === true && !named) {
+        throw new Error('codex-pro: the required thread name was not confirmed; no task prompt was sent')
+      }
     }
     if (lifecycle !== undefined) await lifecycle('thread-ready')
   } catch (error: unknown) {
+    if (error instanceof OutputLimitError) limitOutput(error)
     const failureStage = processFailureFacts === undefined ? startupStage : 'process'
     const cleanup = await teardownOnce()
     const failure = startupFailure(
@@ -916,7 +934,7 @@ export async function startCodexRun(
       if (truncated) failure = { stage: 'output', category: 'output-limit' }
       else failure ??= { stage: 'output', category: 'output-incomplete' }
       const detail = truncated
-        ? `codex-pro: output exceeded ${String(maxOutputBytes)} bytes and was truncated`
+        ? `codex-pro: protocol frame or retained output exceeded ${String(maxOutputBytes)} bytes`
         : 'codex-pro: app-server output could not be completely drained'
       diagnostic = diagnostic === undefined ? detail : `${diagnostic}; ${detail}`
     } else if (timedOut) {
@@ -1101,6 +1119,8 @@ export async function runCodexOnce(
     readonly signal: AbortSignal
     readonly onStart?: ((id: string) => void) | undefined
     readonly onProgress?: ((text: string) => void) | undefined
+  readonly onActivity?: ((event: ActivityEvent) => void) | undefined
+  readonly activityIntervalMs?: number | undefined
   },
 ): Promise<CodexRunOutcome> {
   const run = await startCodexRun(
@@ -1125,6 +1145,8 @@ export async function runCodexOnce(
       disposeGraceMs: options.disposeGraceMs,
       maxOutputBytes: options.maxOutputBytes,
       onProgress: options.onProgress,
+      onActivity: options.onActivity,
+      activityIntervalMs: options.activityIntervalMs,
     },
     options.signal,
   )
@@ -1180,6 +1202,8 @@ export async function delegateOnce(options: {
   readonly onStart?: (id: string) => void
   /** Narrates notable child activity. */
   readonly onProgress?: ((text: string) => void) | undefined
+  readonly onActivity?: ((event: ActivityEvent) => void) | undefined
+  readonly activityIntervalMs?: number | undefined
 }): Promise<DelegatedCodexRun> {
   const outcome = await runCodexOnce(options)
   const text = outcome.output.map((block) => block.text).join('\n\n')

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.1 (source candidate)
+
+- Forward coalesced, metadata-only activity from the active root and owned child turns through the public machine API and independent supervisor. Keep activity separate from text output, durable ACKs and receipts; do not synthesize heartbeats or count unrelated/stale turns.
+- Observe owned child activity with default native tools even when no native profile is supplied, without changing Codex configuration or inventing requested-native evidence.
+- Require collaboration ancestry to belong to the active parent turn and match its sender. Stale parent turns or foreign senders cannot establish activity ownership.
+- Relay the same activity from Host provider, foreground/PTC and background tool calls through the optional versioned Flywheel host service, using the actual DSH Agent and per-call identity.
+- Bound individual protocol frames and retained answer/image/early-message data instead of cumulative valid stream traffic; preserve UTF-8 framing, reject oversized unfinished frames and bound stderr display without cancelling useful work.
+- Include native ownership and usage replay in the retained-data allowance, copy only required identities/counters, and use one bounded JSONL buffer for arbitrarily fragmented reads.
+- Name new persistent machine threads with an explicit readable threadName or workspace-based fallback. Normalize desktop task labels and preserve existing/user-edited titles on resume without changing ephemeral persistence.
+- Require confirmed naming before a new persistent machine task is dispatched. A rejected or unconfirmed write returns a recoverable, not-dispatched failure with the known thread and independent cleanup evidence; direct desktop naming remains best effort.
+- Keep observed child turn and closure facts authoritative over late creation snapshots, including V2 started markers. Preserve real subsequent turns and queued follow-up work in the native completion gate.
+- Preserve parent-only child terminal evidence across repeated creation snapshots, even before a child turn ID is known; keep missing turn identity and usage unknown.
+- Exercise real public machine/supervisor/guardian and registered desktop tool paths for long streams exceeding 32 MiB, child-only progress, stale/foreign events, genuine silence, cancellation, recovery, naming and retained-output limits. No new registry publication or live-account acceptance is claimed.
+
 ## 0.10.0 (source candidate)
 
 - Add a real DSH native settings page, a live Config schema, whole-object per-call overrides and explicit null/off semantics. Keep default inheritance distinct from off.
