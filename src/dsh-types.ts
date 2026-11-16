@@ -34,6 +34,7 @@ export interface AgentOptionsLike {
 /** What one delegation asks for. */
 export interface SubagentStartRequestLike {
   readonly prompt: readonly (TextBlock | OtherBlock)[]
+  readonly label?: string
   readonly parent: AgentLike
   readonly signal: AbortSignal
   /**

@@ -43,6 +43,7 @@ try {
   assert.ok(capabilities.permissions.includes('workspace-write'))
   assert.equal(capabilities.javascriptLifecycle.version, 1)
   assert.equal(capabilities.native.version, 1)
+  assert.equal(capabilities.javascriptActivity.version, 1)
   const nativeReceipt = JSON.parse(run(bin, ['--json'], { input: JSON.stringify({ ...request, native: { version: 1, agents: { enabled: false } } }) }))
   assert.equal(nativeReceipt.ok, true)
   assert.equal(nativeReceipt.native.effective.matched, true)
@@ -72,9 +73,17 @@ try {
   assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'recovery-consumer.mjs')])), {
     version: 1, status: 'terminal', events: ['thread-ready', 'dispatch-intent', 'dispatch-possible', 'turn-accepted', 'terminal', 'cleanup-confirmed'],
   })
+  writeFileSync(join(install, 'activity-consumer.mjs'),
+    'import { runMachine, MACHINE_ACTIVITY_CAPABILITIES } from "dsh-subagent-codex-pro/machine";\n'
+    + 'const events = []; const receipt = await runMachine(' + JSON.stringify({ ...request, maxOutputBytes: 8192, threadMode: 'persistent', threadName: 'Flywheel · package · Design', native: { version: 1, agents: { enabled: true } } })
+    + ', { env: { FAKE_MACHINE_MODE: "activity-child" }, onLifecycle() {}, activityIntervalMs: 30, onActivity: e => events.push(e) });\n'
+    + 'if (!receipt.ok || !events.some(e => e.eventTypes.includes("item/reasoning/summaryTextDelta"))) throw new Error("installed activity missing");\n'
+    + 'if (JSON.stringify(events).includes("PRIVATE_REASONING")) throw new Error("activity leaked body");\n'
+    + 'process.stdout.write(JSON.stringify({ version: MACHINE_ACTIVITY_CAPABILITIES.version, ok: receipt.ok }));\n')
+  assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'activity-consumer.mjs')])), { version: 1, ok: true })
   process.stdout.write(JSON.stringify({ ok: true, version: manifest.version,
     actualNpmInstall: true, publicMachineAPI: true, installedCLI: true,
-    builtGuardian: true, builtMachineSupervisor: true, durableLifecycle: true, readOnlyRecovery: true, inferenceRequests: 0 }) + '\n')
+    builtGuardian: true, builtMachineSupervisor: true, providerActivity: true, durableLifecycle: true, readOnlyRecovery: true, inferenceRequests: 0 }) + '\n')
 } finally {
   rmSync(temp, { recursive: true, force: true })
 }

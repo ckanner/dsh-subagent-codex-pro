@@ -70,6 +70,32 @@ test('a response may arrive split across chunks', async () => {
   assert.deepEqual(await pending, { deep: 'value' })
 })
 
+test('UTF-8 response characters survive byte boundaries', async () => {
+  const { transport, toPeer, fromPeer } = pair()
+  const pending = transport.request('unicode', {})
+  const id = (toPeer.lines[0] as { id: number }).id
+  const bytes = Buffer.from(JSON.stringify({ id, result: '告警 🧭' }) + '\n')
+  for (const byte of bytes) fromPeer.emit('data', Buffer.from([byte]))
+  assert.equal(await pending, '告警 🧭')
+})
+
+test('frame limits reset after each complete message and reject an oversized unfinished frame', async () => {
+  const toPeer = new FakeStream(), fromPeer = new FakeStream()
+  let observed = 0, exceeded = 0
+  const transport = new LineTransport(toPeer, fromPeer, { onNotification: () => { observed++ } },
+    { maxFrameBytes: 128, onLimit: () => { exceeded++ } })
+  for (let i = 0; i < 1000; i++) fromPeer.feed('{"method":"observed"}\n')
+  assert.equal(observed, 1000)
+  const pending = transport.request('will-not-fit', {})
+  fromPeer.feed('x'.repeat(100))
+  fromPeer.feed('x'.repeat(29))
+  await assert.rejects(pending, /protocol frame exceeded/)
+  fromPeer.feed('{"method":"ignored-after-failure"}\n')
+  assert.equal(observed, 1000)
+  assert.equal(exceeded, 1)
+  assert.equal(transport.pendingCount, 0)
+})
+
 test('several messages in one chunk are all handled', async () => {
   const seen: string[] = []
   const { transport, fromPeer } = pair({ onNotification: (method) => { seen.push(method) } })

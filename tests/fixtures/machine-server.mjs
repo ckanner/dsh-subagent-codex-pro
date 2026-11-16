@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // A real process implementing only the app-server messages needed by contract tests.
 import { createInterface } from 'node:readline'
+import { once } from 'node:events'
 import { appendFileSync, writeFileSync } from 'node:fs'
 const config = {}
 for (let i = 2; i < process.argv.length; i++) {
@@ -11,6 +12,7 @@ for (let i = 2; i < process.argv.length; i++) {
 const mode = process.env.FAKE_MACHINE_MODE ?? 'success'
 if (process.env.FAKE_MACHINE_PROCESS_FILE) writeFileSync(process.env.FAKE_MACHINE_PROCESS_FILE,
   JSON.stringify({ pid: process.pid, processGroupId: process.ppid }))
+if (process.env.FAKE_MACHINE_ARGV_FILE) writeFileSync(process.env.FAKE_MACHINE_ARGV_FILE, JSON.stringify(process.argv.slice(2)))
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\n')
 const reply = (id, result) => send({ id, result })
 const notify = (method, params) => send({ method, params })
@@ -46,6 +48,33 @@ for await (const line of createInterface({ input: process.stdin })) {
     reply(message.id, {})
   } else if (message.method === 'turn/start' || message.method === 'review/start') {
     reply(message.id, { turn: { id: 'machine-turn' }, reviewThreadId: p.threadId })
+    if (mode.startsWith('activity-')) {
+      const root = p.threadId, rootTurn = 'machine-turn';
+      notify('turn/started', { threadId: root, turn: { id: rootTurn } });
+      if (mode === 'activity-quiet') continue;
+      const child = mode.startsWith('activity-child');
+      if (child) {
+        notify('item/completed', { threadId: root, turnId: rootTurn, item: { type: 'collabAgentToolCall', id: 'spawn-activity', tool: 'spawnAgent', senderThreadId: root, receiverThreadIds: ['activity-child'] } });
+        notify('turn/started', { threadId: 'activity-child', turn: { id: 'child-turn' } });
+      }
+      const tid = mode === 'activity-unowned' ? 'other-thread' : child ? 'activity-child' : root;
+      const turn = mode === 'activity-stale-root' ? 'old-turn' : child ? 'child-turn' : rootTurn;
+      notify('item/started', { threadId: tid, turnId: turn, item: { type: 'reasoning', id: 'reasoning', summary: [], content: [] } });
+      if (mode === 'activity-child-stale') notify('turn/completed', { threadId: tid, turn: { id: turn, status: 'completed' } });
+      void (async () => {
+        const burst = mode === 'activity-burst';
+        const count = burst ? 10_000 : 20;
+        for (let i = 0; i < count; i++) {
+          if (!notify('item/reasoning/summaryTextDelta', { threadId: tid, turnId: turn, itemId: 'reasoning', summaryIndex: 0,
+            delta: burst ? 'x'.repeat(4096) : 'PRIVATE_REASONING' })) await once(process.stdout, 'drain');
+          if (!burst) await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        if (child && mode !== 'activity-child-stale') notify('turn/completed', { threadId: tid, turn: { id: turn, status: 'completed' } });
+        notify('item/completed', { threadId: root, turnId: rootTurn, item: { type: 'agentMessage', phase: 'final_answer', text: 'ACTIVITY_OK' } });
+        notify('turn/completed', { threadId: root, turn: { id: rootTurn, status: 'completed' } });
+      })().catch(() => {});
+      continue;
+    }
     // A disabled native policy must not spawn fixture children on a later live-settings call.
     if (mode.startsWith('native-child') && config['agents.enabled'] !== false) {
       notify('turn/started', { threadId: 'child-1', turn: { id: 'child-turn' } })
@@ -63,6 +92,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     if (mode === 'turn-hang') continue
     setImmediate(() => {
+      if (mode === 'retained-images') for (let i = 0; i < 10; i++) notify('item/completed', {
+        threadId: p.threadId, turnId: 'machine-turn', item: { type: 'mcpToolCall', id: 'image-' + i,
+          result: { content: [{ type: 'image', mimeType: 'image/png', data: Buffer.from('x'.repeat(900)).toString('base64') }] } },
+      })
       for (const total of [100, 140, 140]) notify('thread/tokenUsage/updated', {
         threadId: p.threadId, turnId: 'machine-turn',
         tokenUsage: { total: usage(total), last: usage(20), modelContextWindow: 272000 },

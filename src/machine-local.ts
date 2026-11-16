@@ -1,4 +1,5 @@
 /** Private one-run implementation, supervised by the public machine API. */
+import { readableThreadName } from './thread-name.ts'
 import { randomUUID } from 'node:crypto'
 import { CodexRunFailure, DEFAULT_RUN_TIMEOUT_MS, startCodexRun, type CodexRunSpec } from './run.ts'
 import type { CodexPermissionMode } from './wire.ts'
@@ -71,6 +72,9 @@ export async function runMachineLocal(value: MachineRequest, options: MachineOpt
     effort: request.effort,
     permissionMode: request.permissionMode as CodexPermissionMode,
     runTimeoutMs: request.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+    threadName: readableThreadName(request.threadName, request.cwd),
+    activityIntervalMs: options.activityIntervalMs,
+    onActivity: options.onActivity,
     threadMode: request.threadMode ?? (request.threadId === undefined ? 'ephemeral' : 'persistent'),
     ...(request.threadId === undefined ? {} : { resumeThreadId: request.threadId }),
     ...(request.maxOutputBytes === undefined ? {} : { maxOutputBytes: request.maxOutputBytes }),

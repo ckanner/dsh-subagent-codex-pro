@@ -84,8 +84,8 @@ export function nativeArguments(request: NativeRequest | undefined, review: { mo
 }
 
 /** Identity must be established by a parent relation, never by an arbitrary notification. */
-export class NativeTracker {
-  readonly request: NativeRequest
+export class NativeTracker<Request extends NativeRequest | undefined = NativeRequest> {
+  readonly request: Request
   #root: string | undefined
   #children = new Map<string, NativeChild>()
   #usage = new Map<string, TokenUsageTracker>()
@@ -100,7 +100,12 @@ export class NativeTracker {
   #truncated = false
   #effective: NativeReceipt['effective'] = { source: null, matched: false, config: null }
   #report: ((event: NativeEvent) => void) | undefined
-  constructor(request: NativeRequest, report?: (event: NativeEvent) => void, review: { model?: string | undefined; effort?: string | undefined } = {}) { this.request = request; this.#report = report; this.#expected = nativeConfig(request, review) }
+  constructor(request: Request, report?: (event: NativeEvent) => void, review: { model?: string | undefined; effort?: string | undefined } = {}) {
+    this.request = request
+    this.#report = report
+    // Observing default native tools does not request or verify new controls.
+    this.#expected = request === undefined ? {} : nativeConfig(request, review)
+  }
   get configurationOverrides(): Record<string, unknown> { return structuredClone(this.#expected) }
   setRoot(id: string): void { this.#root = id; this.#replayOrphans() }
   #replayOrphans(): void {
@@ -119,7 +124,7 @@ export class NativeTracker {
     const matches = (a: unknown, b: unknown): boolean => object(a) && object(b) ? Object.entries(b).every(([k, v]) => matches(a[k], v)) : a === b
     let matched = Object.entries(expected).every(([k, v]) => matches(actual[k], v))
     const v2 = object(config?.features) ? config.features.multi_agent_v2 : undefined
-    if (this.request.agents?.enabled && object(v2) && v2.enabled !== false) {
+    if (this.request?.agents?.enabled && object(v2) && v2.enabled !== false) {
       if (v2.disable_native_tools === true) matched = false
       const cap = this.request.agents.maxConcurrentThreads
       if (cap !== undefined && typeof v2.max_concurrent_threads_per_session === 'number' && v2.max_concurrent_threads_per_session > cap + 1) matched = false
@@ -143,6 +148,10 @@ export class NativeTracker {
     const child = typeof id === 'string' ? this.#children.get(id) : undefined
     return child !== undefined && ((nullable && turnId === null) || (typeof turnId === 'string' && child.turnId === turnId))
   }
+  activeTurn(id: unknown, turnId: unknown): boolean {
+    const child = typeof id === 'string' ? this.#children.get(id) : undefined
+    return child?.state === 'running' && child.turnId !== null && child.turnId === turnId
+  }
   #child(id: unknown, parent: unknown, kind = 'agent', fresh = false): NativeChild | undefined {
     if (!text(id) || id === this.#root || !this.owns(parent)) return undefined
     const existing = this.#children.get(id)
@@ -155,7 +164,7 @@ export class NativeTracker {
       return existing
     }
     if (this.#children.size >= 4096) throw new Error('native child evidence exceeds its bounded ledger')
-    if (this.request.agents?.enabled !== true) throw new Error('native child dispatch was observed while agents were disabled')
+    if (this.request !== undefined && this.request.agents?.enabled !== true) throw new Error('native child dispatch was observed while agents were disabled')
     const child: NativeChild = { id, parentId: String(parent), kind, state: 'created', model: null, turnId: null, usage: null }
     this.#children.set(id, child)
     const tracker = new TokenUsageTracker(); if (fresh) { tracker.resetForNewThread(id); this.#fresh.add(id) } else tracker.resetForResume(id); this.#usage.set(id, tracker)
@@ -242,6 +251,7 @@ export class NativeTracker {
     return [...this.#children.values()].filter(c => c.state === 'running' && c.turnId !== null).map(c => ({ threadId: c.id, turnId: c.turnId! }))
   }
   report(cleanupConfirmed = false): NativeReceipt {
+    if (this.request === undefined) throw new Error('observed child ownership has no requested native policy receipt')
     const usage: Record<string, CodexUsageReport> = {}
     for (const [id, tracker] of this.#usage) {
       const report = tracker.report()

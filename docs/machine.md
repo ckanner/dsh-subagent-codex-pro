@@ -51,11 +51,22 @@ npx --no-install codex-pro-machine --json < request.json > receipt.json
 
 The required fields are protocol, requestId, prompt, cwd, model, effort and
 permissionMode. Machine calls always name their model and permission explicitly.
-Optional fields are command, timeoutMs, maxOutputBytes, threadMode, threadId,
+Optional fields are command, timeoutMs, maxOutputBytes, threadMode, threadId, threadName,
 images, outputSchema and native. See [native capabilities](native-capabilities.md) for versioned controls and evidence. Unknown fields fail before a process starts. The CLI
-limits the entire request to 1 MiB. The runner limits stdout and diagnostic bytes
-to 32 MiB by default; exceeding the configured positive maxOutputBytes stops the
-run and sets execution.truncated instead of accepting a partial answer.
+limits the entire request to 1 MiB. Starting with the 0.10.1 source candidate,
+`maxOutputBytes` bounds each incoming JSONL frame and the serialized retained
+answer/image/early-message data (default 32 MiB). Successfully processed deltas do
+not consume a lifetime stream allowance: a long valid stream may exceed 32 MiB.
+An oversized frame, including one without a newline, or oversized retained output
+stops the run with `execution.truncated`. Diagnostics forward at most the smaller
+of this allowance and 64 KiB; additional stderr is drained without cancelling useful work.
+
+For a newly created persistent thread, `threadName` supplies a readable title via
+`thread/name/set`. It must be a single nonempty line of at most 1024 input bytes;
+display names are normalized and limited to 160 Unicode characters. If omitted,
+the machine API uses `DSH · <workspace basename> · Codex delegation`, never the
+complete prompt. A resumed thread is never renamed, preserving user edits.
+Ephemeral threads stay ephemeral and do not get a persistent-list title.
 
 Permissions are read-only, workspace-write (approvalPolicy=never), or the
 explicit dangerously-bypass-approvals-and-sandbox mode. The machine API does not
@@ -192,3 +203,40 @@ this is not a claim that the user's DSH Desktop profile has loaded the package.
 - [Codex 0.166 ThreadStartResponse](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/app-server-protocol/schema/typescript/v2/ThreadStartResponse.ts)
 - [Codex 0.166 TurnStartResponse](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/app-server-protocol/schema/typescript/v2/TurnStartResponse.ts)
 - [Codex app-server documentation](https://learn.chatgpt.com/docs/app-server)
+
+## Observed activity (0.10.1 source candidate)
+
+`MACHINE_ACTIVITY_VERSION === 1` and `MACHINE_ACTIVITY_CAPABILITIES` declare
+`metadataOnly`, `coalesced`, and `rootAndChildren`. `ACTIVITY_EVENT_TYPES` exports
+the exact allowed event names. Callers may provide `onActivity(event)` and
+`activityIntervalMs` (integer 1–60000, default 250) to `runMachine`. The callback
+also crosses the independent machine supervisor when durable lifecycle is enabled:
+
+```js
+const receipt = await runMachine(request, {
+  onLifecycle: event => persistAndAcknowledge(event),
+  recoveryDirectory: '/absolute/new/private/invocation',
+  activityIntervalMs: 250,
+  onActivity: event => observeActivity(event),
+});
+```
+
+Each event contains only `{version:1, sequence, kind:'provider-progress',
+source:'codex-pro', scope:'root'|'child'|'mixed', eventTypes, observedEvents}`.
+Sequences increase per invocation; eventTypes is a unique bounded subset of the
+exported allowlist. No prompt, reasoning text, command, arguments, path or thread
+identifier is forwarded. Root item/text/reasoning/command progress and active,
+owned child turns participate. Foreign threads, stale turns and completed child
+turns cannot keep the current invocation alive.
+
+This ownership tracking also applies when `native` is absent and the existing
+Codex configuration permits native child tools. It does not issue `config/read`,
+change app-server configuration, emit opt-in native events or invent a native
+policy receipt. An explicit native policy continues to be verified and enforced.
+
+One coalescer covers the entire owned tree. It reports only while handling a new
+observed event, never from a heartbeat timer; a quiet provider remains quiet.
+The interval is a minimum spacing, not an event-rate guarantee. Activity does not
+acknowledge dispatch, prove success, establish usage, or change journal recovery.
+`onProgress` remains optional human-facing narration. The single-document CLI
+continues to print only its terminal receipt.

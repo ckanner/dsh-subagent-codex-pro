@@ -29,6 +29,8 @@
 import { isAbsolute, resolve } from 'node:path'
 import { realpathSync } from 'node:fs'
 
+import { createActivityReporter, type ActivityEvent } from './activity.ts'
+import { OutputLimitError } from './output-limits.ts'
 import type { LineTransport } from './jsonrpc.ts'
 import { NativeTracker, type NativeRequest, type NativeReceipt, type NativeEvent } from './native.ts'
 import { TokenUsageTracker, type CodexUsageReport, type TokenUsageNotificationLike } from './usage.ts'
@@ -344,6 +346,10 @@ export interface WireOutput {
  * named decision the caller already holds.
  */
 export interface CodexWireOptions {
+  readonly onActivity?: ((event: ActivityEvent) => void) | undefined
+  readonly activityIntervalMs?: number | undefined
+  readonly maxRetainedBytes?: number | undefined
+  readonly onOutputLimit?: ((error: OutputLimitError) => void) | undefined
   readonly native?: NativeRequest | undefined
   readonly nativeCwd?: string | undefined
   readonly nativeReviewEffort?: string | undefined
@@ -482,7 +488,11 @@ function requireAppliedConfiguration(configuration: AppliedConfiguration): void 
  * method must first become part of the provider contract.
  */
 export class CodexAppServerWire {
+  #activity: (scope: 'root' | 'child', method: string) => void
+  #maxRetainedBytes: number
+  #onOutputLimit: ((error: OutputLimitError) => void) | undefined
   #native: NativeTracker | undefined
+  #ownedChildren: NativeTracker<NativeRequest | undefined>
   #nativeCwd: string | undefined
   #permissionMode: CodexPermissionMode
   #threadMode: CodexThreadMode
@@ -530,7 +540,11 @@ export class CodexAppServerWire {
     transport: LineTransport,
     options: CodexWireOptions,
   ) {
+    this.#activity = createActivityReporter(options.onActivity, options.activityIntervalMs)
+    this.#maxRetainedBytes = options.maxRetainedBytes ?? 32 * 1024 * 1024
+    this.#onOutputLimit = options.onOutputLimit
     this.#native = options.native === undefined ? undefined : new NativeTracker(options.native, options.onNativeEvent, { model: options.model, effort: options.nativeReviewEffort })
+    this.#ownedChildren = this.#native ?? new NativeTracker(undefined)
     this.#nativeCwd = options.nativeCwd
     this.#permissionMode = options.permissionMode
     this.#model = options.model
@@ -641,7 +655,7 @@ export class CodexAppServerWire {
         + `where ${this.#threadMode} was asked for`)
     }
     this.#threadId = id
-    this.#native?.setRoot(id)
+    this.#ownedChildren.setRoot(id)
     this.#usage.resetForNewThread(id)
     this.#flushEarlyUsage()
     this.#configuration = appliedConfiguration('thread/start', requested, response)
@@ -699,7 +713,7 @@ export class CodexAppServerWire {
       if (id !== threadId) throw new Error(`${P}: thread/resume answered for ${id}, not ${threadId}`)
     }
     this.#threadId = threadId
-    this.#native?.setRoot(threadId)
+    this.#ownedChildren.setRoot(threadId)
     this.#usage.resetForResume(threadId)
     this.#flushEarlyUsage()
     this.#configuration = appliedConfiguration('thread/resume', requested, response)
@@ -756,6 +770,7 @@ export class CodexAppServerWire {
   #recordImages(item: Record0): void {
     if (item.type === 'imageView' && typeof item.path === 'string' && item.path !== '') {
       this.#images.push({ path: item.path })
+      this.#checkRetainedOutput()
       return
     }
     if (item.type !== 'mcpToolCall') return
@@ -772,6 +787,7 @@ export class CodexAppServerWire {
           data: image.data,
           ...(typeof image.mimeType === 'string' ? { mimeType: image.mimeType } : {}),
         })
+        this.#checkRetainedOutput()
       }
     }
   }
@@ -920,7 +936,7 @@ export class CodexAppServerWire {
    */
   interrupt(): void {
     if (this.#closed) return
-    for (const child of this.#native?.running() ?? []) this.#transport.request('turn/interrupt', child).catch(() => {})
+    for (const child of this.#ownedChildren.running()) this.#transport.request('turn/interrupt', child).catch(() => {})
     if (this.#threadId === undefined || this.#turnId === undefined) return
     this.#transport.request('turn/interrupt', { threadId: this.#threadId, turnId: this.#turnId }).catch(() => {})
   }
@@ -958,6 +974,7 @@ export class CodexAppServerWire {
 
   /** Poison the connection: every guarded operation fails from here on. */
   #fail(error: Error): void {
+    if (error instanceof OutputLimitError) this.#onOutputLimit?.(error)
     this.#fatal.reject(error)
   }
 
@@ -1001,7 +1018,7 @@ export class CodexAppServerWire {
    */
   #validateRunIds(params: Record0, nullableTurn = false): boolean {
     if (params.threadId !== this.#threadId) {
-      if (this.#native?.acceptsTurn(params.threadId, params.turnId, nullableTurn)) return false
+      if (this.#ownedChildren.acceptsTurn(params.threadId, params.turnId, nullableTurn)) return false
       throw new Error(`${P}: app-server request referenced an unowned native thread or turn`)
     }
     if (nullableTurn && params.turnId === null) return false
@@ -1109,10 +1126,30 @@ export class CodexAppServerWire {
     }
   }
 
+  #checkRetainedOutput(): void {
+    const bytes = Buffer.byteLength(JSON.stringify([this.#lastFinalAnswer, this.#lastPartialAnswer,
+      this.#lastUnphasedAnswer, this.#images, this.#earlyTurnNotifications, this.#earlyUsageNotifications]))
+    if (bytes > this.#maxRetainedBytes) throw new OutputLimitError(`codex-pro: retained output exceeded ${this.#maxRetainedBytes} bytes`)
+  }
+
+  #observeActivity(method: string, fields: Record0, childCompleted = false): void {
+    if (this.#closed || this.#terminalObserved || this.#dispatch === 'not-dispatched') return
+    const turn = fields.turn && typeof fields.turn === 'object' ? fields.turn as Record0 : undefined
+    const turnId = method === 'turn/started' || method === 'turn/completed' ? turn?.id : fields.turnId
+    if (typeof turnId !== 'string' || !turnId) return
+    if (fields.threadId === this.#threadId && (this.#turnId ?? this.#pendingTurnId) === turnId) {
+      this.#activity('root', method)
+    } else if (childCompleted || this.#ownedChildren.activeTurn(fields.threadId, turnId)) this.#activity('child', method)
+  }
+
   /** Route one notification, buffering anything that precedes the turn id. */
   #handleNotification(method: string, params: unknown, order?: number): void {
     const fields = (params ?? {}) as Record0
-    if (order === undefined) this.#native?.observe(method, params)
+    if (order === undefined) {
+      const childCompleted = method === 'turn/completed' && this.#ownedChildren.activeTurn(fields.threadId, (fields.turn as Record0 | undefined)?.id)
+      this.#ownedChildren.observe(method, params)
+      if (method !== 'turn/started' || fields.threadId !== this.#threadId) this.#observeActivity(method, fields, childCompleted)
+    }
     if (method === 'thread/tokenUsage/updated') {
       if (this.#threadId === undefined) {
         if (this.#earlyUsageNotifications.length < 128) {
@@ -1121,6 +1158,7 @@ export class CodexAppServerWire {
             turnId: fields.turnId,
             tokenUsage: fields.tokenUsage,
           })
+          this.#checkRetainedOutput()
         } else this.#earlyUsageOverflow = true
         return
       }
@@ -1154,6 +1192,7 @@ export class CodexAppServerWire {
       if (this.#turnCompleted !== undefined && this.#turnId === undefined) {
         this.#observePendingTurnId(string(turn.id, 'turn/started turn id'))
       }
+      if (order === undefined) this.#observeActivity(method, fields)
       return
     }
     if (method === 'item/completed') {
@@ -1163,6 +1202,7 @@ export class CodexAppServerWire {
         if (this.#turnCompleted !== undefined) {
           this.#observePendingTurnId(id)
           this.#earlyTurnNotifications.push({ method, params, order: this.#nextObservationOrder() })
+          this.#checkRetainedOutput()
         }
         return
       }
@@ -1170,7 +1210,7 @@ export class CodexAppServerWire {
       const item = object(fields.item, 'item/completed item')
       if (this.#recordDeclinedItem(item, order)) return
       this.#recordImages(item)
-      if (item.type === 'exitedReviewMode' && typeof item.review === 'string') { this.#lastFinalAnswer = item.review; return }
+      if (item.type === 'exitedReviewMode' && typeof item.review === 'string') { this.#lastFinalAnswer = item.review; this.#checkRetainedOutput(); return }
       if (item.type !== 'agentMessage') {
         // Commands, file changes, and searches: the interesting part of a long run.
         this.#progress(describeItem(item))
@@ -1186,6 +1226,7 @@ export class CodexAppServerWire {
       else {
         throw new Error(`${P}: app-server returned an unknown agent message phase ${JSON.stringify(item.phase)}`)
       }
+      this.#checkRetainedOutput()
       return
     }
     if (method !== 'turn/completed') return
@@ -1197,6 +1238,7 @@ export class CodexAppServerWire {
     if (this.#turnId === undefined) {
       this.#observePendingTurnId(id)
       this.#earlyTurnNotifications.push({ method, params, order: this.#nextObservationOrder() })
+      this.#checkRetainedOutput()
       return
     }
     if (id !== this.#turnId) return
