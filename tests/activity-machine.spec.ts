@@ -1,12 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { runMachine, recoverMachine, type ActivityEvent, type MachineLifecycleEvent } from '../src/machine.ts'
 
 function fixture(t: { after(fn: () => void): void }) {
-  const cwd = mkdtempSync(join(tmpdir(), 'codex-activity-'))
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'codex-activity-')))
   t.after(() => rmSync(cwd, { recursive: true, force: true }))
   const command = join(cwd, 'server.mjs')
   copyFileSync(new URL('./fixtures/machine-server.mjs', import.meta.url), command)
