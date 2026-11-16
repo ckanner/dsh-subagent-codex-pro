@@ -43,6 +43,76 @@ for (const type of ['collabAgentToolCall', 'collaborationToolCall']) {
   }
 }
 
+for (const type of ['collabAgentToolCall', 'collaborationToolCall']) {
+  for (const status of ['completed', 'failed', 'closed', 'shutdown', 'errored', 'interrupted', 'notFound']) {
+    test(`duplicate ${type} creation cannot replace parent-only ${status} evidence`, () => {
+      const tracker = new NativeTracker(native)
+      tracker.setRoot('root')
+      parentSnapshot(tracker, status, 'spawnAgent', type)
+      assert.equal(tracker.report().children[0]?.turnId, null)
+      assert.equal(tracker.report().completion.confirmed, true)
+      for (const stale of ['running', 'completed']) {
+        parentSnapshot(tracker, stale, 'spawnAgent', type)
+        assert.equal(tracker.report().children[0]?.state, status)
+        assert.equal(tracker.report().completion.confirmed, true)
+      }
+      childTurn(tracker, 'turn/started', 'actual-new-turn')
+      assert.equal(tracker.activeTurn('child', 'actual-new-turn'), true)
+      assert.equal(tracker.report().completion.confirmed, false, 'real new work is not frozen')
+      childTurn(tracker, 'turn/completed', 'actual-new-turn')
+      assert.equal(tracker.report().completion.confirmed, true)
+    })
+  }
+}
+
+for (const tool of ['sendInput', 'followupTask']) {
+  test(`late creation cannot finish ${tool} work queued without a child turn identity`, () => {
+    const tracker = new NativeTracker(native)
+    tracker.setRoot('root')
+    parentSnapshot(tracker, 'completed')
+    parentSnapshot(tracker, 'running', tool)
+    assert.equal(tracker.report().children[0]?.turnId, null)
+    parentSnapshot(tracker, 'completed')
+    assert.equal(tracker.report().children[0]?.state, 'running')
+    assert.equal(tracker.report().completion.confirmed, false)
+    childTurn(tracker, 'turn/started', 'actual-new-turn')
+    childTurn(tracker, 'turn/completed', 'actual-new-turn')
+    assert.equal(tracker.report().completion.confirmed, true)
+  })
+}
+
+test('creation snapshots may advance an initial pending child to completion', () => {
+  const tracker = new NativeTracker(native)
+  tracker.setRoot('root')
+  for (const status of ['pendingInit', 'running', 'completed']) {
+    parentSnapshot(tracker, status)
+    assert.equal(tracker.report().children[0]?.state, status)
+    assert.equal(tracker.report().completion.confirmed, status === 'completed')
+  }
+})
+
+test('v2 creation cannot replace parent-only terminal or subsequent interaction evidence', () => {
+  const tracker = new NativeTracker(native)
+  tracker.setRoot('root')
+  const activity = (kind: string) => tracker.observe('item/completed', {
+    threadId: 'root', turnId: 'root-turn', item: {
+      type: 'subAgentActivity', id: 'spawn-child', agentThreadId: 'child', kind,
+    },
+  })
+  activity('completed')
+  activity('started')
+  assert.equal(tracker.report().children[0]?.turnId, null)
+  assert.equal(tracker.report().children[0]?.state, 'completed')
+  assert.equal(tracker.report().completion.confirmed, true)
+  activity('interacted')
+  activity('started')
+  assert.equal(tracker.report().children[0]?.state, 'interacted')
+  assert.equal(tracker.report().completion.confirmed, false)
+  childTurn(tracker, 'turn/started', 'actual-new-turn')
+  childTurn(tracker, 'turn/completed', 'actual-new-turn')
+  assert.equal(tracker.report().completion.confirmed, true)
+})
+
 test('late terminal creation snapshot cannot finish an actual new child turn', () => {
   const tracker = new NativeTracker(native)
   tracker.setRoot('root')
@@ -179,6 +249,31 @@ for (const mode of ['parent-first', 'child-first', 'v2-child-first', 'next-pendi
     if (!complete) assert.equal(receipt.outcome?.execution.failure?.category, 'completion')
     const recovered = await recoverMachine({ protocol: 1, requestId: input.requestId, runId: receipt.runId, recoveryDirectory })
     assert.equal(recovered.receipt?.ok, complete)
+    assert.deepEqual(recovered.receipt?.native?.completion, receipt.native?.completion)
+  })
+}
+
+for (const mode of ['parent-only', 'v2-parent-only', 'parent-only-queued', 'parent-only-next-completed']) {
+  test(`public supervised machine preserves parent-only creation evidence: ${mode}`, async t => {
+    const input = fixture(t), recoveryDirectory = join(input.cwd, 'journal')
+    const receipt = await runMachine({ ...input, native: mode.startsWith('v2-')
+      ? { version: 1, agents: { enabled: true, backend: 'v2' } } : native }, {
+      env: { NATIVE_SNAPSHOT_ORDER: mode }, recoveryDirectory,
+    })
+    const complete = mode !== 'parent-only-queued'
+    assert.equal(receipt.ok, complete, JSON.stringify(receipt))
+    assert.equal(receipt.outcome?.output[0]?.text, 'PARENT_DONE')
+    assert.equal(receipt.native?.completion.confirmed, complete)
+    assert.equal(receipt.native?.cleanup.confirmed, true)
+    assert.deepEqual(receipt.native?.completion.pendingIds, complete ? [] : ['child'])
+    assert.equal(receipt.native?.children[0]?.turnId, mode === 'parent-only-next-completed' ? 'second-turn' : null)
+    assert.equal(receipt.native?.children[0]?.state, complete ? 'completed' : 'running')
+    assert.equal(receipt.native?.usage.totalTokens, mode === 'parent-only-next-completed' ? 70 : null,
+      'terminal creation evidence cannot invent unobserved token usage')
+    if (!complete) assert.equal(receipt.outcome?.execution.failure?.category, 'completion')
+    const recovered = await recoverMachine({ protocol: 1, requestId: input.requestId, runId: receipt.runId, recoveryDirectory })
+    assert.equal(recovered.receipt?.ok, complete)
+    assert.deepEqual(recovered.receipt?.native?.children, receipt.native?.children)
     assert.deepEqual(recovered.receipt?.native?.completion, receipt.native?.completion)
   })
 }

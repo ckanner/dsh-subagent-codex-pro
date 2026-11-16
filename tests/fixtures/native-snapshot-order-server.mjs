@@ -30,10 +30,10 @@ for await (const line of createInterface({ input: process.stdin })) {
   else if (message.method === 'turn/start') {
     reply(message.id, { turn: { id: 'root-turn' } })
     notify('turn/started', { threadId: 'root', turn: { id: 'root-turn' } })
-    const creation = status => notify('item/completed', { threadId: 'root', turnId: 'root-turn', item: mode.startsWith('v2-') ? {
-      type: 'subAgentActivity', id: 'spawn-child', agentThreadId: 'child', kind: 'started', model: 'child-model',
+    const creation = (status, tool = 'spawnAgent') => notify('item/completed', { threadId: 'root', turnId: 'root-turn', item: mode.startsWith('v2-') ? {
+      type: 'subAgentActivity', id: 'spawn-child', agentThreadId: 'child', kind: status === 'running' ? 'started' : status, model: 'child-model',
     } : {
-      type: 'collabAgentToolCall', id: 'spawn-child', tool: 'spawnAgent', senderThreadId: 'root',
+      type: 'collabAgentToolCall', id: tool === 'spawnAgent' ? 'spawn-child' : 'followup-child', tool, senderThreadId: 'root',
       receiverThreadIds: ['child'], model: 'child-model', agentsStates: { child: { status } },
     } })
     const start = id => notify('turn/started', { threadId: 'child', turn: { id } })
@@ -41,16 +41,29 @@ for await (const line of createInterface({ input: process.stdin })) {
       tokenUsage: { total: total(n) } })
     const complete = id => notify('turn/completed', { threadId: 'child', turn: { id, status: 'completed' } })
 
-    if (mode === 'parent-first') creation('running')
-    start('first-turn')
-    usage('first-turn', 50)
-    complete('first-turn')
-    if (mode.startsWith('next-')) {
-      start('second-turn')
-      usage('second-turn', 70)
+    if (mode.includes('parent-only')) {
       creation('completed')
-      if (mode === 'next-completed') complete('second-turn')
-    } else if (mode.endsWith('child-first')) creation('running')
+      if (mode === 'parent-only-queued' || mode === 'parent-only-next-completed') {
+        creation('running', 'sendInput')
+        creation('completed')
+        if (mode === 'parent-only-next-completed') {
+          start('second-turn')
+          usage('second-turn', 70)
+          complete('second-turn')
+        }
+      } else creation('running')
+    } else {
+      if (mode === 'parent-first') creation('running')
+      start('first-turn')
+      usage('first-turn', 50)
+      complete('first-turn')
+      if (mode.startsWith('next-')) {
+        start('second-turn')
+        usage('second-turn', 70)
+        creation('completed')
+        if (mode === 'next-completed') complete('second-turn')
+      } else if (mode.endsWith('child-first')) creation('running')
+    }
     // Delayed content from the first turn cannot count as fresh provider activity.
     notify('item/reasoning/summaryTextDelta', { threadId: 'child', turnId: 'first-turn', itemId: 'old-reasoning',
       summaryIndex: 0, delta: 'STALE_CHILD_CONTENT' })

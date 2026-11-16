@@ -11,6 +11,7 @@
 - Name new persistent machine threads with an explicit readable threadName or workspace-based fallback. Normalize desktop task labels and preserve existing/user-edited titles on resume without changing ephemeral persistence.
 - Require confirmed naming before a new persistent machine task is dispatched. A rejected or unconfirmed write returns a recoverable, not-dispatched failure with the known thread and independent cleanup evidence; direct desktop naming remains best effort.
 - Keep observed child turn and closure facts authoritative over late creation snapshots, including V2 started markers. Preserve real subsequent turns and queued follow-up work in the native completion gate.
+- Preserve parent-only child terminal evidence across repeated creation snapshots, even before a child turn ID is known; keep missing turn identity and usage unknown.
 - Exercise real public machine/supervisor/guardian and registered desktop tool paths for long streams exceeding 32 MiB, child-only progress, stale/foreign events, genuine silence, cancellation, recovery, naming and retained-output limits. No new registry publication or live-account acceptance is claimed.
 
 ## 0.10.0 (source candidate)

@@ -44,9 +44,9 @@ const terminalStates = new Set(['completed', 'failed', 'closed', 'shutdown', 'er
 const observationMethods = new Set(['thread/started', 'thread/closed', 'turn/started', 'turn/completed',
   'thread/tokenUsage/updated', 'item/started', 'item/completed'])
 
-/** Creation snapshots can lag the independent child listener, including orphan replay. */
-function acceptsCreationState(child: NativeChild): boolean {
-  return child.turnId === null && child.state !== 'closed'
+/** Creation cannot replace terminal evidence or work queued after that creation. */
+function acceptsCreationState(child: NativeChild, superseded: boolean): boolean {
+  return !superseded && child.turnId === null && !terminalStates.has(child.state)
 }
 
 /** Keep identity/counters only: thread history and tool contents are not ownership evidence. */
@@ -112,6 +112,9 @@ export class NativeTracker<Request extends NativeRequest | undefined = NativeReq
   readonly request: Request
   #root: string | undefined
   #children = new Map<string, NativeChild>()
+  // Once superseded, creation stays historical even if later work is pending
+  // before the child listener supplies a new turn identity. Bounded by children.
+  #creationSuperseded = new Set<string>()
   #usage = new Map<string, TokenUsageTracker>()
   #fresh = new Set<string>()
   #turns = new Map<string, Set<string>>()
@@ -137,7 +140,7 @@ export class NativeTracker<Request extends NativeRequest | undefined = NativeReq
   get configurationOverrides(): Record<string, unknown> { return structuredClone(this.#expected) }
   get retainedBytes(): number { return this.#retainedBytes }
   #checkRetainedEvidence(): void {
-    this.#retainedBytes = Buffer.byteLength(JSON.stringify([this.#root, [...this.#children], [...this.#fresh],
+    this.#retainedBytes = Buffer.byteLength(JSON.stringify([this.#root, [...this.#children], [...this.#creationSuperseded], [...this.#fresh],
       [...this.#turns].map(([id, turns]) => [id, [...turns]]), [...this.#history], this.#orphans,
       this.#events, [...this.#seen], this.#effective, this.#expected]))
       + [...this.#usage.values()].reduce((bytes, tracker) => bytes + tracker.retainedBytes, 0)
@@ -244,7 +247,10 @@ export class NativeTracker<Request extends NativeRequest | undefined = NativeReq
         const state: Record<string, unknown> | undefined = states && object(states[child.id]) ? states[child.id] as Record<string, unknown> : undefined
         // A spawn snapshot describes creation, not a later child turn. Other
         // tools (sendInput/followupTask) can still report newly queued work.
-        if (state && text(state.status) && (item.tool !== 'spawnAgent' || acceptsCreationState(child))) child.state = state.status
+        if (state && text(state.status) && (item.tool !== 'spawnAgent' || acceptsCreationState(child, this.#creationSuperseded.has(child.id)))) {
+          child.state = state.status
+          if (item.tool !== 'spawnAgent' || terminalStates.has(child.state)) this.#creationSuperseded.add(child.id)
+        }
         if (text(item.model)) child.model = item.model
         this.#record('child-state', child)
       }
@@ -254,7 +260,10 @@ export class NativeTracker<Request extends NativeRequest | undefined = NativeReq
       if (child) {
         if (text(item.model)) child.model = item.model
         // v2's started activity is emitted by spawn, not by each child turn.
-        if (text(item.kind) && (item.kind !== 'started' || acceptsCreationState(child))) child.state = item.kind === 'started' ? 'running' : item.kind
+        if (text(item.kind) && (item.kind !== 'started' || acceptsCreationState(child, this.#creationSuperseded.has(child.id)))) {
+          child.state = item.kind === 'started' ? 'running' : item.kind
+          if (item.kind !== 'started') this.#creationSuperseded.add(child.id)
+        }
         this.#record('child-activity', child)
       }
     }

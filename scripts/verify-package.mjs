@@ -127,17 +127,23 @@ process.stdout.write(JSON.stringify({ explicit: true, fallback: true, recovery: 
 import assert from 'node:assert/strict';
 import { runMachine } from 'dsh-subagent-codex-pro/machine';
 const request = ${JSON.stringify({ ...request, command: snapshotCommand, native: { version: 1, agents: { enabled: true } } })};
-for (const mode of ['child-first', 'parent-first', 'next-pending', 'next-completed', 'v2-child-first']) {
-  const native = mode === 'v2-child-first'
+for (const mode of ['child-first', 'parent-first', 'next-pending', 'next-completed', 'v2-child-first',
+  'parent-only', 'v2-parent-only', 'parent-only-queued', 'parent-only-next-completed']) {
+  const native = mode.startsWith('v2-')
     ? { version: 1, agents: { enabled: true, backend: 'v2' } } : request.native;
   const receipt = await runMachine({ ...request, native, requestId: 'packed-snapshot-' + mode },
     { env: { NATIVE_SNAPSHOT_ORDER: mode }, onLifecycle() {} });
-  const complete = mode !== 'next-pending';
+  const complete = mode !== 'next-pending' && mode !== 'parent-only-queued';
   assert.equal(receipt.ok, complete, JSON.stringify(receipt));
   assert.equal(receipt.native?.completion.confirmed, complete);
   assert.equal(receipt.outcome?.cleanup.confirmed, true);
   assert.equal(receipt.native?.children.length, 1);
   assert.equal(receipt.native.children[0].state, complete ? 'completed' : 'running');
+  if (mode.includes('parent-only') && mode !== 'parent-only-next-completed') {
+    assert.equal(receipt.native.children[0].turnId, null);
+    assert.equal(receipt.native.children[0].usage.status, 'unknown');
+    assert.equal(receipt.native.usage.totalTokens, null);
+  }
   if (!complete) assert.equal(receipt.outcome?.execution.failure?.category, 'completion');
 }
 process.stdout.write(JSON.stringify({ creationOrdering: true, newTurnPending: true }));
