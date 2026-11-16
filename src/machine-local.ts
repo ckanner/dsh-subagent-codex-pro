@@ -73,6 +73,7 @@ export async function runMachineLocal(value: MachineRequest, options: MachineOpt
     permissionMode: request.permissionMode as CodexPermissionMode,
     runTimeoutMs: request.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
     threadName: readableThreadName(request.threadName, request.cwd),
+    requireThreadName: true,
     activityIntervalMs: options.activityIntervalMs,
     onActivity: options.onActivity,
     threadMode: request.threadMode ?? (request.threadId === undefined ? 'ephemeral' : 'persistent'),

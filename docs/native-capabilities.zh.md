@@ -156,6 +156,13 @@ cleanup。只有可信原生父子关系、协作 item 与子 Agent 活动才能
 实际进程清理未确认，都会导致失败。原生 child failed 是“已终结”事实，不自动
 等同于父任务业务失败；父任务可能已经处理了这个失败。
 
+子线程 turn 事件优先于较旧的创建快照。迟到的 `spawnAgent` 状态或 V2
+`subAgentActivity: started` 标记不能把已完成的子 turn 改回运行中，也不能把
+较新的运行中 turn 改为完成；已经观察到的线程关闭同样保留。真正的新
+`turn/started` 仍会启动新一轮工作；后续 `sendInput` 或 follow-up 快照也仍可
+在新 turn 到达前标记排队中的工作。父线程已有答案或进程清理成功，都不能
+替代子线程完成证据。
+
 取消向已知运行中的子 turn 和根 turn 发送 interrupt，然后通过 guardian 有界清理
 整个本地进程组。收到 interrupt 回复不等于已经清理；cleanup 以物理进程证据为准。
 完整 machine 终态随现有 journal 保存，读取恢复记录不会自动启动新模型。

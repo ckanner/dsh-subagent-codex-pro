@@ -81,9 +81,73 @@ try {
     + 'if (JSON.stringify(events).includes("PRIVATE_REASONING")) throw new Error("activity leaked body");\n'
     + 'process.stdout.write(JSON.stringify({ version: MACHINE_ACTIVITY_CAPABILITIES.version, ok: receipt.ok }));\n')
   assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'activity-consumer.mjs')])), { version: 1, ok: true })
+  const nameCommand = join(temp, 'name-admission-server.mjs')
+  copyFileSync(join(root, 'tests/fixtures/thread-name-admission-server.mjs'), nameCommand)
+  chmodSync(nameCommand, 0o755)
+  writeFileSync(join(install, 'name-admission-consumer.mjs'), `
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { runMachine, recoverMachine } from 'dsh-subagent-codex-pro/machine';
+const base = ${JSON.stringify({ ...request, command: nameCommand, threadMode: 'persistent' })};
+for (const explicit of [true, false]) {
+  const request = { ...base, requestId: 'packed-name-' + explicit,
+    ...(explicit ? { threadName: 'Flywheel · package · Naming admission' } : {}) };
+  const capture = join(base.cwd, 'name-calls-' + explicit + '.jsonl');
+  const directory = join(base.cwd, 'name-journal-' + explicit);
+  const events = [];
+  const receipt = await runMachine(request, { recoveryDirectory: directory,
+    env: { CODEX_NAME_ADMISSION_MODE: 'reject', CODEX_NAME_ADMISSION_CAPTURE: capture },
+    onLifecycle: event => events.push(event.event) });
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.failure?.stage, 'thread-name');
+  assert.equal(receipt.failure?.category, 'protocol');
+  assert.equal(receipt.failure?.execution?.dispatch, 'not-dispatched');
+  assert.equal(receipt.failure?.execution?.threadId, 'name-admission-thread');
+  assert.equal(receipt.failure?.cleanup?.confirmed, true);
+  assert.deepEqual(events, ['terminal', 'cleanup-confirmed']);
+  const calls = readFileSync(capture, 'utf8');
+  const methods = calls.trim().split('\\n').map(line => JSON.parse(line).method);
+  assert.equal(methods.filter(method => method === 'thread/name/set').length, 1);
+  assert.equal(methods.includes('turn/start'), false);
+  const recovered = await recoverMachine({ protocol: 1, requestId: receipt.requestId,
+    runId: receipt.runId, recoveryDirectory: directory });
+  assert.equal(recovered.status, 'terminal');
+  assert.deepEqual(recovered.receipt, receipt);
+  assert.equal(readFileSync(capture, 'utf8'), calls);
+}
+process.stdout.write(JSON.stringify({ explicit: true, fallback: true, recovery: true }));
+`)
+  assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'name-admission-consumer.mjs')])),
+    { explicit: true, fallback: true, recovery: true })
+  const snapshotCommand = join(temp, 'native-snapshot-order-server.mjs')
+  copyFileSync(join(root, 'tests/fixtures/native-snapshot-order-server.mjs'), snapshotCommand)
+  chmodSync(snapshotCommand, 0o755)
+  writeFileSync(join(install, 'native-snapshot-consumer.mjs'), `
+import assert from 'node:assert/strict';
+import { runMachine } from 'dsh-subagent-codex-pro/machine';
+const request = ${JSON.stringify({ ...request, command: snapshotCommand, native: { version: 1, agents: { enabled: true } } })};
+for (const mode of ['child-first', 'parent-first', 'next-pending', 'next-completed', 'v2-child-first']) {
+  const native = mode === 'v2-child-first'
+    ? { version: 1, agents: { enabled: true, backend: 'v2' } } : request.native;
+  const receipt = await runMachine({ ...request, native, requestId: 'packed-snapshot-' + mode },
+    { env: { NATIVE_SNAPSHOT_ORDER: mode }, onLifecycle() {} });
+  const complete = mode !== 'next-pending';
+  assert.equal(receipt.ok, complete, JSON.stringify(receipt));
+  assert.equal(receipt.native?.completion.confirmed, complete);
+  assert.equal(receipt.outcome?.cleanup.confirmed, true);
+  assert.equal(receipt.native?.children.length, 1);
+  assert.equal(receipt.native.children[0].state, complete ? 'completed' : 'running');
+  if (!complete) assert.equal(receipt.outcome?.execution.failure?.category, 'completion');
+}
+process.stdout.write(JSON.stringify({ creationOrdering: true, newTurnPending: true }));
+`)
+  assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'native-snapshot-consumer.mjs')])),
+    { creationOrdering: true, newTurnPending: true })
   process.stdout.write(JSON.stringify({ ok: true, version: manifest.version,
     actualNpmInstall: true, publicMachineAPI: true, installedCLI: true,
-    builtGuardian: true, builtMachineSupervisor: true, providerActivity: true, durableLifecycle: true, readOnlyRecovery: true, inferenceRequests: 0 }) + '\n')
+    builtGuardian: true, builtMachineSupervisor: true, providerActivity: true, durableLifecycle: true,
+    readOnlyRecovery: true, requiredNaming: true, childCreationOrdering: true, inferenceRequests: 0 }) + '\n')
 } finally {
   rmSync(temp, { recursive: true, force: true })
 }

@@ -44,6 +44,11 @@ const terminalStates = new Set(['completed', 'failed', 'closed', 'shutdown', 'er
 const observationMethods = new Set(['thread/started', 'thread/closed', 'turn/started', 'turn/completed',
   'thread/tokenUsage/updated', 'item/started', 'item/completed'])
 
+/** Creation snapshots can lag the independent child listener, including orphan replay. */
+function acceptsCreationState(child: NativeChild): boolean {
+  return child.turnId === null && child.state !== 'closed'
+}
+
 /** Keep identity/counters only: thread history and tool contents are not ownership evidence. */
 function replayEvidence(method: string, params: Record<string, unknown>): Record<string, unknown> {
   if (method === 'thread/tokenUsage/updated') return { ...snapshotTokenUsage(params) }
@@ -237,7 +242,9 @@ export class NativeTracker<Request extends NativeRequest | undefined = NativeReq
         if (!child) continue
         const states = object(item.agentsStates) ? item.agentsStates : undefined
         const state: Record<string, unknown> | undefined = states && object(states[child.id]) ? states[child.id] as Record<string, unknown> : undefined
-        if (state && text(state.status)) child.state = state.status
+        // A spawn snapshot describes creation, not a later child turn. Other
+        // tools (sendInput/followupTask) can still report newly queued work.
+        if (state && text(state.status) && (item.tool !== 'spawnAgent' || acceptsCreationState(child))) child.state = state.status
         if (text(item.model)) child.model = item.model
         this.#record('child-state', child)
       }
@@ -246,7 +253,8 @@ export class NativeTracker<Request extends NativeRequest | undefined = NativeReq
       const child = this.#child(item.agentThreadId, params.threadId, 'agent', item.kind === 'started')
       if (child) {
         if (text(item.model)) child.model = item.model
-        if (text(item.kind)) child.state = item.kind === 'started' ? 'running' : item.kind
+        // v2's started activity is emitted by spawn, not by each child turn.
+        if (text(item.kind) && (item.kind !== 'started' || acceptsCreationState(child))) child.state = item.kind === 'started' ? 'running' : item.kind
         this.#record('child-activity', child)
       }
     }

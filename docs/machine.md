@@ -75,6 +75,14 @@ display names are normalized and limited to 160 Unicode characters. If omitted,
 the machine API uses `DSH · <workspace basename> · Codex delegation`, never the
 complete prompt. A resumed thread is never renamed, preserving user edits.
 Ephemeral threads stay ephemeral and do not get a persistent-list title.
+For a new persistent machine thread, the name write must be confirmed before
+`thread-ready` or task dispatch, including when the default title is used. If
+the write is not confirmed, the receipt fails at `thread-name` with
+`execution.dispatch: "not-dispatched"`; it preserves the known thread ID and
+independently confirmed process cleanup. Read-only recovery returns that same
+failure without retrying the name or task. Creation alone does not prove that an
+empty thread is resumable. Direct desktop calls retain their existing best-effort
+naming behavior.
 
 Permissions are read-only, workspace-write (approvalPolicy=never), or the
 explicit dangerously-bypass-approvals-and-sandbox mode. The machine API does not

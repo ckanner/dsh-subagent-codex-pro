@@ -312,7 +312,7 @@ apply: v0.7.0 provider "codex-pro" registered … timeout=5400000ms; presets=["d
 
 **有两件事由 app-server 决定，都是实测出来的。** 还没跑过 turn 的 thread **无法续接** —— 它会回 `no rollout found` —— 所以一条 thread 只有在完成第一次 turn 之后才可续接。另外，**Codex 应用只在 originator 恰好是 `Codex Desktop` 时才会列出该 thread**，那是它客户端过滤用的唯一取值；`originator` 就是设置它的，默认即该字面量。改成别的值就是用**应用内可见性**换一个**诚实的名字**，而 Codex CLI 两种情况都能列出。
 
-因为 originator 无法说明 thread 来自哪里，新建的持久 thread 通过 `thread/name/set` 命名为 `DSH · <本次调用的描述>`。名称规范化为一行、最多 160 个 Unicode 字符；续接时不重新命名，以保留用户修改的标题。
+因为 originator 无法说明 thread 来自哪里，新建的持久 thread 通过 `thread/name/set` 命名为 `DSH · <本次调用的描述>`。名称规范化为一行、最多 160 个 Unicode 字符；续接时不重新命名，以保留用户修改的标题。桌面直接调用保持尽力命名；下文 machine API 对新持久线程要求在派发任务前确认名称写入。
 
 **一条 thread 同时只能承载一个 turn。** 同一会话同时发出的两条委派会都去争那条被记住的 thread，app-server 会以 `thread-store conflict: … already has an active writer` 拒绝第二条。所以 `session` 模式下的调用会**先检查**：若那条被记住的 thread 正被另一个委派使用，就跳过它，本次调用另起一条，并把这次跳过**写进日志**。并行工作照常进行 —— 只是不再共用一段对话，而这正是 `persistent` 本来的行为，于是该模式**退化为支持这种工作形态的那个模式**。要**顺序执行并让对话延续**就选 `session`；要**同时跑多条委派**就选 `persistent` 或 `ephemeral`。
 
@@ -439,6 +439,11 @@ machine 请求可传 `threadName` 为新持久线程命名，输入须为非空�
 1024 字节，展示最多 160 个 Unicode 字符；省略时使用
 `DSH · <工作区目录名> · Codex delegation`，不会把完整 prompt 用作标题。
 resume 不覆盖已有标题，ephemeral 不因此变为 persistent。
+machine 新建持久线程时，包括使用默认标题的情况，必须先确认名称写入，才会
+发送 `thread-ready` 或任务 prompt。写入未确认时，回执在 `thread-name` 阶段
+失败，`execution.dispatch` 为 `not-dispatched`，保留已知 thread ID 与独立
+确认的进程清理证据。只读恢复返回同一失败回执，不重试命名或任务；仅创建了
+空线程不代表其已经可续接。桌面直接调用保持原有尽力命名行为。
 
 本节描述源码候选；离线公开接口和安装包测试不等于 npm 已发布，也不代表真实
 模型、账号或桌面 UI 已验收。详细接口见 [Machine API](machine.md)。

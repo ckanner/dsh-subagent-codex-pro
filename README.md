@@ -501,6 +501,8 @@ Because the originator cannot say where a thread came from, a persistent one is 
 `DSH · <the call's description>` through `thread/name/set`, which is what a person sees in the list.
 Only new persistent threads are named; resuming never overwrites a title the user
 has edited. Names are normalized to one line and at most 160 Unicode characters.
+Direct desktop calls keep best-effort naming. The [machine API](docs/machine.md)
+requires a confirmed name write before dispatching a new persistent thread's task.
 
 **One thread carries one turn at a time.** Two delegations sent at once from the same session would both reach
 for the remembered thread, and the app-server refuses the second with `thread-store conflict: … already has an

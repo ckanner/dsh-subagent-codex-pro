@@ -155,6 +155,12 @@ export interface CodexRunSpec {
    * appear in.
    */
   readonly threadName?: string | undefined
+  /**
+   * Require a fresh persistent thread's name before publishing or dispatching,
+   * using the workspace fallback when no explicit name is supplied.
+   * Machine callers enable this; existing direct callers remain best-effort.
+   */
+  readonly requireThreadName?: boolean | undefined
   /** Extra environment entries. */
   readonly env?: Readonly<Record<string, string>> | undefined
   /** Grace between termination tiers. */
@@ -824,9 +830,13 @@ export async function startCodexRun(
     // A persistent thread is named so the Codex application's list says where it
     // came from; the id alone cannot, because the originator has to be the value
     // that client filters on.
-    if (spec.threadMode === 'persistent' && spec.resumeThreadId === undefined && spec.threadName !== undefined) {
+    if (spec.threadMode === 'persistent' && spec.resumeThreadId === undefined
+        && (spec.threadName !== undefined || spec.requireThreadName === true)) {
       startupStage = 'thread-name'
-      await Promise.race([wire.setThreadName(readableThreadName(spec.threadName, spec.cwd), runAbort.signal), processFailure])
+      const named = await Promise.race([wire.setThreadName(readableThreadName(spec.threadName, spec.cwd), runAbort.signal), processFailure])
+      if (spec.requireThreadName === true && !named) {
+        throw new Error('codex-pro: the required thread name was not confirmed; no task prompt was sent')
+      }
     }
     if (lifecycle !== undefined) await lifecycle('thread-ready')
   } catch (error: unknown) {

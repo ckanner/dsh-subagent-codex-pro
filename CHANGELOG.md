@@ -9,6 +9,8 @@
 - Bound individual protocol frames and retained answer/image/early-message data instead of cumulative valid stream traffic; preserve UTF-8 framing, reject oversized unfinished frames and bound stderr display without cancelling useful work.
 - Include native ownership and usage replay in the retained-data allowance, copy only required identities/counters, and use one bounded JSONL buffer for arbitrarily fragmented reads.
 - Name new persistent machine threads with an explicit readable threadName or workspace-based fallback. Normalize desktop task labels and preserve existing/user-edited titles on resume without changing ephemeral persistence.
+- Require confirmed naming before a new persistent machine task is dispatched. A rejected or unconfirmed write returns a recoverable, not-dispatched failure with the known thread and independent cleanup evidence; direct desktop naming remains best effort.
+- Keep observed child turn and closure facts authoritative over late creation snapshots, including V2 started markers. Preserve real subsequent turns and queued follow-up work in the native completion gate.
 - Exercise real public machine/supervisor/guardian and registered desktop tool paths for long streams exceeding 32 MiB, child-only progress, stale/foreign events, genuine silence, cancellation, recovery, naming and retained-output limits. No new registry publication or live-account acceptance is claimed.
 
 ## 0.10.0 (source candidate)

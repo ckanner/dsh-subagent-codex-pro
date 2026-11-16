@@ -125,6 +125,14 @@ identities and events use the dedicated tools or machine API. An unconfirmed
 native configuration, unfinished observed child or unconfirmed process cleanup
 prevents a successful result, even when the root already emitted a final answer.
 
+Child turn events take precedence over older creation snapshots. A late
+`spawnAgent` state or V2 `subAgentActivity: started` marker cannot revive an
+already completed child turn or finish a newer running turn. An observed thread
+closure is also preserved. A genuine new `turn/started` still starts new work;
+later `sendInput` or follow-up snapshots can still mark queued work pending
+before that turn is observed. This ordering rule does not infer completion from
+a parent's final answer or from successful process cleanup.
+
 ## Configuration and full agent access
 
 Native agents receive Codex's actual configured tools, permissions, MCP servers,
