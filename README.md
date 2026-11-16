@@ -625,7 +625,8 @@ uses its existing native-tool defaults. Observation does not add configuration
 overrides or fabricate a requested-native receipt; explicit native off is still
 enforced.
 
-`maxOutputBytes` bounds a protocol frame and retained result data, rather than
+`maxOutputBytes` separately bounds a protocol frame and retained result/ownership/
+usage evidence, rather than
 all bytes ever streamed. Valid long streams do not consume a cumulative 32 MiB
 allowance; oversized or unterminated frames and oversized retained results still
 fail conservatively. Stderr display is bounded and additional diagnostics are drained.

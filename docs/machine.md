@@ -55,11 +55,19 @@ Optional fields are command, timeoutMs, maxOutputBytes, threadMode, threadId, th
 images, outputSchema and native. See [native capabilities](native-capabilities.md) for versioned controls and evidence. Unknown fields fail before a process starts. The CLI
 limits the entire request to 1 MiB. Starting with the 0.10.1 source candidate,
 `maxOutputBytes` bounds each incoming JSONL frame and the serialized retained
-answer/image/early-message data (default 32 MiB). Successfully processed deltas do
+answer/image/early-message data plus native ownership and usage evidence (default
+32 MiB). Native replay stores only identities and numeric accounting fields, never
+thread history or arbitrary payload extensions. Default native tools keep only
+the ownership ledger; a requested native profile also retains its bounded receipt
+evidence. The frame and retained-data allowances are separate: this is not an
+answer-only byte limit or a cumulative count of previously discarded metadata.
+Successfully processed deltas do
 not consume a lifetime stream allowance: a long valid stream may exceed 32 MiB.
 An oversized frame, including one without a newline, or oversized retained output
 stops the run with `execution.truncated`. Diagnostics forward at most the smaller
 of this allowance and 64 KiB; additional stderr is drained without cancelling useful work.
+Byte-fragmented JSONL uses one bounded growth buffer rather than one allocation
+per fragment.
 
 For a newly created persistent thread, `threadName` supplies a readable title via
 `thread/name/set`. It must be a single nonempty line of at most 1024 input bytes;

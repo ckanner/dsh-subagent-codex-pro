@@ -830,6 +830,7 @@ export async function startCodexRun(
     }
     if (lifecycle !== undefined) await lifecycle('thread-ready')
   } catch (error: unknown) {
+    if (error instanceof OutputLimitError) limitOutput(error)
     const failureStage = processFailureFacts === undefined ? startupStage : 'process'
     const cleanup = await teardownOnce()
     const failure = startupFailure(

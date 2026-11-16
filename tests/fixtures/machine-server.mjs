@@ -52,9 +52,9 @@ for await (const line of createInterface({ input: process.stdin })) {
       const root = p.threadId, rootTurn = 'machine-turn';
       notify('turn/started', { threadId: root, turn: { id: rootTurn } });
       if (mode === 'activity-quiet') continue;
-      const child = mode.startsWith('activity-child');
+      const child = mode.startsWith('activity-child') || mode === 'activity-stale-spawn' || mode === 'activity-foreign-sender';
       if (child) {
-        notify('item/completed', { threadId: root, turnId: rootTurn, item: { type: 'collabAgentToolCall', id: 'spawn-activity', tool: 'spawnAgent', senderThreadId: root, receiverThreadIds: ['activity-child'] } });
+        notify('item/completed', { threadId: mode === 'activity-foreign-sender' ? 'foreign-thread' : root, turnId: mode === 'activity-stale-spawn' ? 'old-turn' : rootTurn, item: { type: 'collabAgentToolCall', id: 'spawn-activity', tool: 'spawnAgent', senderThreadId: root, receiverThreadIds: ['activity-child'] } });
         notify('turn/started', { threadId: 'activity-child', turn: { id: 'child-turn' } });
       }
       const tid = mode === 'activity-unowned' ? 'other-thread' : child ? 'activity-child' : root;
@@ -92,6 +92,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     if (mode === 'turn-hang') continue
     setImmediate(() => {
+      if (mode === 'retained-children') for (let i = 0; i < 40; i++) notify('item/completed', {
+        threadId: p.threadId, turnId: 'machine-turn', item: { type: 'collabAgentToolCall', id: 'spawn-' + i,
+          tool: 'spawnAgent', senderThreadId: p.threadId, receiverThreadIds: ['bounded-child-' + i] },
+      })
       if (mode === 'retained-images') for (let i = 0; i < 10; i++) notify('item/completed', {
         threadId: p.threadId, turnId: 'machine-turn', item: { type: 'mcpToolCall', id: 'image-' + i,
           result: { content: [{ type: 'image', mimeType: 'image/png', data: Buffer.from('x'.repeat(900)).toString('base64') }] } },

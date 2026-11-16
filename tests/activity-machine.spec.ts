@@ -74,6 +74,30 @@ test('retained image bodies remain bounded even when every individual frame fits
   assert.equal(result.outcome?.execution.failure?.category, 'output-limit')
 })
 
+for (const native of [undefined, { version: 1 as const, agents: { enabled: true } }]) {
+  test(`retained ${native ? 'explicit' : 'default'} child ledgers are bounded across small protocol frames`, async t => {
+    const request = fixture(t)
+    const result = await runMachine({ ...request, maxOutputBytes: 4096, ...(native ? { native } : {}) },
+      { env: { FAKE_MACHINE_MODE: 'retained-children' } })
+    assert.equal(result.ok, false)
+    assert.equal(result.outcome?.execution.truncated, true)
+    assert.equal(result.outcome?.cleanup.confirmed, true)
+    assert.equal(result.outcome?.execution.failure?.category, 'output-limit')
+  })
+}
+
+test('native evidence that exceeds the retained budget during startup reports output-limit and cleanup', async t => {
+  const request = fixture(t)
+  const result = await runMachine({ ...request, maxOutputBytes: 1024,
+    native: { version: 1, agents: { enabled: true, defaultModel: 'm'.repeat(450) } } })
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, null)
+  assert.equal(result.failure?.category, 'output-limit')
+  assert.equal(result.failure?.execution?.truncated, true)
+  assert.equal(result.failure?.execution?.dispatch, 'not-dispatched')
+  assert.equal(result.failure?.cleanup?.confirmed, true)
+})
+
 test('activity and naming inputs fail before process startup when invalid', async t => {
   const request = fixture(t)
   for (const activityIntervalMs of [0, -1, 0.5, 60_001, Infinity]) {
@@ -85,7 +109,7 @@ test('activity and naming inputs fail before process startup when invalid', asyn
   }
 })
 
-for (const mode of ['activity-unowned', 'activity-stale-root', 'activity-child-stale']) test(`${mode} cannot produce activity for this invocation`, async t => {
+for (const mode of ['activity-unowned', 'activity-stale-root', 'activity-child-stale', 'activity-stale-spawn', 'activity-foreign-sender']) test(`${mode} cannot produce activity for this invocation`, async t => {
   const request = fixture(t), events: ActivityEvent[] = []
   const result = await runMachine({ ...request, native: { version: 1, agents: { enabled: true } } }, {
     env: { FAKE_MACHINE_MODE: mode }, activityIntervalMs: 1,

@@ -80,7 +80,7 @@ interface Pending {
 export class LineTransport {
   #nextId = 1
   #pending = new Map<number | string, Pending>()
-  #fragments: Buffer[] = []
+  #frame: Buffer = Buffer.alloc(0)
   #frameBytes = 0
   #maxFrameBytes: number
   #onLimit: ((error: OutputLimitError) => void) | undefined
@@ -202,7 +202,7 @@ export class LineTransport {
   dispose(reason = new Error('jsonrpc: transport disposed')): void {
     if (this.#disposed !== undefined) return
     this.#disposed = reason
-    this.#fragments = []; this.#frameBytes = 0
+    this.#frame = Buffer.alloc(0); this.#frameBytes = 0
     const pending = [...this.#pending.values()]
     this.#pending.clear()
     for (const entry of pending) {
@@ -236,18 +236,30 @@ export class LineTransport {
       const fragment = chunk.subarray(offset, end)
       if (this.#frameBytes + fragment.length > this.#maxFrameBytes) {
         const failure = new OutputLimitError(`codex-pro: protocol frame exceeded ${this.#maxFrameBytes} bytes`)
-        this.#fragments = []; this.#frameBytes = 0
+        this.#frame = Buffer.alloc(0); this.#frameBytes = 0
         this.dispose(failure)
         this.#onLimit?.(failure)
         this.#hooks.onProblem?.(failure)
         return
       }
-      this.#fragments.push(Buffer.from(fragment))
-      this.#frameBytes += fragment.length
+      let line = ''
+      if (newline >= 0 && this.#frameBytes === 0) line = fragment.toString('utf8').trim()
+      else {
+        const size = this.#frameBytes + fragment.length
+        if (size > this.#frame.length) {
+          // A peer can split a frame at every byte. Grow one bounded buffer,
+          // not one Buffer object per fragment, so framing overhead stays bounded.
+          const expanded = Buffer.allocUnsafe(Math.min(this.#maxFrameBytes, Math.max(size, this.#frame.length * 2, 4096)))
+          this.#frame.copy(expanded, 0, 0, this.#frameBytes)
+          this.#frame = expanded
+        }
+        fragment.copy(this.#frame, this.#frameBytes)
+        this.#frameBytes = size
+        if (newline >= 0) line = this.#frame.toString('utf8', 0, this.#frameBytes).trim()
+      }
       offset = end + 1
       if (newline < 0) return
-      const line = Buffer.concat(this.#fragments, this.#frameBytes).toString('utf8').trim()
-      this.#fragments = []; this.#frameBytes = 0
+      this.#frameBytes = 0
       if (line === '') continue
       let message: JsonRpcMessage
       try {

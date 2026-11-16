@@ -93,6 +93,23 @@ test('child thread ancestry received before the root response survives bounded o
   assert.equal(tracker.report().children.length, 2)
 })
 
+test('orphan and resumed-child replay retains only identities and numeric accounting evidence', () => {
+  const tracker = new NativeTracker(parseNativeRequest({ version: 1, agents: { enabled: true } }), undefined, {}, 8192)
+  const irrelevant = 'PRIVATE_HISTORY'.repeat(100_000)
+  tracker.observe('thread/started', { thread: { id: 'child', parentThreadId: 'root', turns: [irrelevant] } })
+  tracker.observe('turn/started', { threadId: 'child', turn: { id: 'child-turn', items: [irrelevant] } })
+  tracker.observe('thread/tokenUsage/updated', { threadId: 'child', turnId: 'child-turn',
+    tokenUsage: { total: { ...total(50), raw: irrelevant }, last: irrelevant, extra: irrelevant } })
+  assert.ok(tracker.retainedBytes < 8192)
+  tracker.setRoot('root')
+  assert.equal(tracker.acceptsTurn('child', 'child-turn'), true)
+  tracker.observe('item/completed', { threadId: 'root', item: { type: 'collabAgentToolCall',
+    tool: 'spawnAgent', senderThreadId: 'root', receiverThreadIds: ['child'] } })
+  tracker.observe('turn/completed', { threadId: 'child', turn: { id: 'child-turn', status: 'completed' } })
+  assert.equal(tracker.report().usage.totalTokens, 50, 'fresh ancestry replays the original compact accounting evidence')
+  assert.ok(tracker.retainedBytes < 8192)
+})
+
 test('unfinished native child snapshots remain partial after physical cleanup', () => {
   const tracker = new NativeTracker(parseNativeRequest({ version: 1, agents: { enabled: true } }))
   tracker.setRoot('root')

@@ -33,7 +33,7 @@ import { createActivityReporter, type ActivityEvent } from './activity.ts'
 import { OutputLimitError } from './output-limits.ts'
 import type { LineTransport } from './jsonrpc.ts'
 import { NativeTracker, type NativeRequest, type NativeReceipt, type NativeEvent } from './native.ts'
-import { TokenUsageTracker, type CodexUsageReport, type TokenUsageNotificationLike } from './usage.ts'
+import { snapshotTokenUsage, TokenUsageTracker, type CodexUsageReport, type TokenUsageNotificationLike } from './usage.ts'
 
 /** Prefix on every error this module raises. */
 const P = 'codex-pro'
@@ -543,8 +543,9 @@ export class CodexAppServerWire {
     this.#activity = createActivityReporter(options.onActivity, options.activityIntervalMs)
     this.#maxRetainedBytes = options.maxRetainedBytes ?? 32 * 1024 * 1024
     this.#onOutputLimit = options.onOutputLimit
-    this.#native = options.native === undefined ? undefined : new NativeTracker(options.native, options.onNativeEvent, { model: options.model, effort: options.nativeReviewEffort })
-    this.#ownedChildren = this.#native ?? new NativeTracker(undefined)
+    this.#native = options.native === undefined ? undefined : new NativeTracker(options.native, options.onNativeEvent,
+      { model: options.model, effort: options.nativeReviewEffort }, this.#maxRetainedBytes)
+    this.#ownedChildren = this.#native ?? new NativeTracker(undefined, undefined, {}, this.#maxRetainedBytes)
     this.#nativeCwd = options.nativeCwd
     this.#permissionMode = options.permissionMode
     this.#model = options.model
@@ -1129,7 +1130,8 @@ export class CodexAppServerWire {
   #checkRetainedOutput(): void {
     const bytes = Buffer.byteLength(JSON.stringify([this.#lastFinalAnswer, this.#lastPartialAnswer,
       this.#lastUnphasedAnswer, this.#images, this.#earlyTurnNotifications, this.#earlyUsageNotifications]))
-    if (bytes > this.#maxRetainedBytes) throw new OutputLimitError(`codex-pro: retained output exceeded ${this.#maxRetainedBytes} bytes`)
+      + this.#ownedChildren.retainedBytes + this.#usage.retainedBytes
+    if (bytes > this.#maxRetainedBytes) throw new OutputLimitError(`codex-pro: retained output or evidence exceeded ${this.#maxRetainedBytes} bytes`)
   }
 
   #observeActivity(method: string, fields: Record0, childCompleted = false): void {
@@ -1147,17 +1149,31 @@ export class CodexAppServerWire {
     const fields = (params ?? {}) as Record0
     if (order === undefined) {
       const childCompleted = method === 'turn/completed' && this.#ownedChildren.activeTurn(fields.threadId, (fields.turn as Record0 | undefined)?.id)
-      this.#ownedChildren.observe(method, params)
+      const item = fields.item && typeof fields.item === 'object' ? fields.item as Record0 : undefined
+      const relation = item && ['collabAgentToolCall', 'collaborationToolCall', 'subAgentActivity'].includes(String(item.type))
+      if (relation && item.senderThreadId !== undefined && item.senderThreadId !== fields.threadId) return
+      // Early completed items already establish a provisional turn below. Do
+      // the same before inspecting ancestry; the start response must still agree.
+      if (relation && method === 'item/completed' && fields.threadId === this.#threadId
+        && this.#turnCompleted !== undefined && this.#turnId === undefined) {
+        if (this.#pendingTurnId !== undefined && fields.turnId !== this.#pendingTurnId) return
+        this.#observePendingTurnId(string(fields.turnId, 'item/completed turn id'))
+      }
+      const ownedRelation = !relation || (fields.threadId === this.#threadId
+        ? this.#dispatch !== 'not-dispatched' && fields.turnId === (this.#turnId ?? this.#pendingTurnId)
+        : this.#ownedChildren.activeTurn(fields.threadId, fields.turnId))
+      if (!ownedRelation) return
+      if (this.#ownedChildren.observe(method, params)) this.#checkRetainedOutput()
       if (method !== 'turn/started' || fields.threadId !== this.#threadId) this.#observeActivity(method, fields, childCompleted)
     }
     if (method === 'thread/tokenUsage/updated') {
       if (this.#threadId === undefined) {
         if (this.#earlyUsageNotifications.length < 128) {
-          this.#earlyUsageNotifications.push({
+          this.#earlyUsageNotifications.push(snapshotTokenUsage({
             threadId: fields.threadId,
             turnId: fields.turnId,
             tokenUsage: fields.tokenUsage,
-          })
+          }))
           this.#checkRetainedOutput()
         } else this.#earlyUsageOverflow = true
         return
@@ -1177,6 +1193,7 @@ export class CodexAppServerWire {
         turnId: fields.turnId,
         tokenUsage,
       })
+      this.#checkRetainedOutput()
       return
     }
     if (method === 'account/rateLimits/updated') {
