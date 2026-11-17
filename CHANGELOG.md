@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Clarify that native persistence, client discovery and continuation are separate. Document fresh durable machine calls, shared local storage requirements and native history filters without promising automatic cross-device visibility or a universal desktop originator filter.
+
 ## 0.10.1 (source candidate)
 
 - Forward coalesced, metadata-only activity from the active root and owned child turns through the public machine API and independent supervisor. Keep activity separate from text output, durable ACKs and receipts; do not synthesize heartbeats or count unrelated/stale turns.

@@ -112,9 +112,9 @@ export interface Config {
    *
    * - `ephemeral` (the default) is a throwaway run: nothing is written that the
    *   Codex CLI or the Codex application can list afterwards.
-   * - `persistent` gives every delegation its own durable thread, which the Codex
-   *   CLI and application list under the session's working directory and
-   *   `thread_id` can continue.
+   * - `persistent` gives every delegation its own durable thread. Native clients
+   *   sharing its Codex home can discover it subject to their history filters,
+   *   and `thread_id` can continue a saved conversation.
    * - `session` reuses one durable thread for the whole Agent session, so a
    *   session that delegates ten times leaves one thread rather than ten, and
    *   after the first delegation each call continues the same conversation —
