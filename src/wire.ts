@@ -363,15 +363,14 @@ export interface CodexWireOptions {
   /**
    * What the app-server records as the thread's originator.
    *
-   * This is `initialize`'s `clientInfo.name`, and for a thread to appear in the
-   * Codex desktop application it must be exactly `Codex Desktop` — that client
-   * filters its list by this one value. The default here is therefore that
-   * literal, and overriding it trades desktop visibility for an honest name.
+   * This is `initialize`'s `clientInfo.name`. The default retains compatibility
+   * with the desktop clients originally tested by this adapter. Native listing
+   * also depends on the shared local store and the client's own history filters.
    */
   readonly originator?: string | undefined
 }
 
-/** The originator the Codex desktop client lists. */
+/** Compatibility originator for the desktop clients originally tested here. */
 export const DEFAULT_ORIGINATOR = 'Codex Desktop'
 
 /** The subset of a permission mode that thread requests actually send. */

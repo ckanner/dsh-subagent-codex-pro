@@ -827,9 +827,8 @@ export async function startCodexRun(
       }
       await Promise.race([wire.resumeThread(spec.resumeThreadId, overrides, runAbort.signal), processFailure])
     }
-    // A persistent thread is named so the Codex application's list says where it
-    // came from; the id alone cannot, because the originator has to be the value
-    // that client filters on.
+    // A persistent thread carries a readable provenance label independently
+    // from the compatibility originator used during initialization.
     if (spec.threadMode === 'persistent' && spec.resumeThreadId === undefined
         && (spec.threadName !== undefined || spec.requireThreadName === true)) {
       startupStage = 'thread-name'

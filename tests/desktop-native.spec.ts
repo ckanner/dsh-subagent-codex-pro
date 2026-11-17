@@ -179,6 +179,39 @@ test('Host provider uses the same live defaults and refuses invented provider op
   assert.equal(h.messages().length, before)
 })
 
+test('Host provider honors configured history without sharing input across one-shot runs', async t => {
+  for (const threadMode of [undefined, 'ephemeral', 'persistent', 'session'] as const) await t.test(threadMode ?? 'default', async t => {
+    const persistent = threadMode === 'persistent' || threadMode === 'session'
+    const originator = persistent ? 'Host history fixture' : undefined
+    const h = harness(t, { ...(threadMode === undefined ? {} : { threadMode }),
+      ...(originator === undefined ? {} : { originator }) }, 'host-persistence')
+    for (const label of ['First history', 'Second history']) {
+      const run = await h.provider.start({ parent: h.agent as never, prompt: [{ type: 'text', text: 'fixture' }],
+        cwd: h.cwd, signal: signal(), label })
+      assert.equal((await run.result).stopReason, 'completed')
+      await run.dispose()
+    }
+    const messages = h.messages(), starts = messages.filter(m => m.method === 'thread/start')
+    assert.equal(starts.length, 2)
+    assert.deepEqual(starts.map(m => m.params.ephemeral), [!persistent, !persistent])
+    assert.equal(messages.some(m => m.method === 'thread/resume'), false)
+    const turns = messages.filter(m => m.method === 'turn/start')
+    assert.equal(new Set(turns.map(m => m.params.threadId)).size, 2)
+    const names = messages.filter(m => m.method === 'thread/name/set')
+    assert.deepEqual(names.map(m => m.params.name), persistent ? ['DSH · First history', 'DSH · Second history'] : [])
+    for (const name of names) {
+      assert.ok(messages.indexOf(name) < messages.findIndex(m => m.method === 'turn/start' && m.params.threadId === name.params.threadId))
+    }
+    assert.deepEqual(messages.filter(m => m.method === 'initialize').map(m => m.params.clientInfo.name),
+      [originator ?? 'Codex Desktop', originator ?? 'Codex Desktop'])
+    if (persistent) {
+      await h.call({ thread_mode: 'ephemeral' })
+      assert.equal(h.messages().filter(m => m.method === 'thread/start').at(-1).params.ephemeral, true)
+      assert.equal(h.messages().filter(m => m.method === 'thread/name/set').length, 2)
+    }
+  })
+})
+
 test('implicit session reuse changes with live native binding while verified external resume remains available', async t => {
   let setting: any = null
   const h = harness(t, { native: { get: () => setting }, threadMode: 'session' })

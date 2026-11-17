@@ -474,8 +474,16 @@ the machine entry requires POSIX. See [ownership and cancellation](docs/machine.
 | | |
 |---|---|
 | `ephemeral` | A throwaway run. Nothing is written that the Codex CLI or the Codex application can list. |
-| `persistent` | Every delegation gets a durable thread: written to `~/.codex/sessions/`, listed by both, continuable. |
+| `persistent` | Every delegation gets durable local history under `CODEX_HOME` (normally `~/.codex`), available to compatible native clients using that same store. |
 | `session` | One durable thread per Agent session, so ten delegations leave one thread and every call after the first continues the same conversation. |
+
+The table's automatic `session` reuse belongs to the independent `subagent_codex`
+tool. The generic DSH Host provider is a one-shot interface: configured
+`persistent` and `session` both create a new named durable thread on every call,
+without selecting an earlier thread to resume. Default or configured `ephemeral`
+still creates throwaway history. Both entry points forward the configured
+originator; the dedicated `subagent_codex_review` tool always stays fresh and
+ephemeral.
 
 A call overrides the choice with `thread_mode`, and continues a thread of its own with `thread_id`. A persistent
 human-text result ends with the thread's id; a schema-constrained result stays pure JSON and reports the id
@@ -491,13 +499,26 @@ applies. A remembered thread with an incompatible configuration is replaced by a
 `thread_id` reports the incompatibility instead of continuing somewhere else. Machine-readable JSON does not
 get the thread marker described next.
 
-**Two things the app-server decides, both measured.** A thread with no turn yet is not resumable — it answers
-`no rollout found` — so a thread becomes continuable only after its first completed turn. And the Codex
-application lists a thread only when its originator is exactly `Codex Desktop`, the single value its client
-filters on; `originator` sets that and defaults to the literal. Overriding it trades application visibility for
-an honest name, and the Codex CLI lists the thread either way.
+**Persistence, discovery and continuation are separate.** The tested 0.165 app-server refused to resume
+a new thread before its first turn with `no rollout found`; a thread ID or successful name write alone
+does not prove a resumable transcript. Native clients must have access to the same `CODEX_HOME` and local
+storage environment. Their history views can filter by source, working directory/project and model provider;
+account-scoped discovery can also hide history from another login. A local thread is not automatically
+a cloud conversation or a conversation on a different device.
 
-Because the originator cannot say where a thread came from, a persistent one is named
+`originator` still defaults to `Codex Desktop` for compatibility with the desktop client versions tested
+when that integration was introduced. It is not a universal listing guarantee: the
+[current upstream local list contract](https://github.com/openai/codex/blob/e5839cbc591df02408d5009e287887c7d57a9167/codex-rs/app-server-protocol/src/protocol/v2/thread.rs)
+defaults to interactive sources and rejects nonempty originator filters locally. Use the native client's
+history/search in the matching project, or `codex resume <thread-id>` for a known durable thread, after
+the owning delegation has stopped. A missing sidebar row does not by itself mean the transcript was deleted.
+
+At that upstream revision, the [`codex app-server` command selects the `VSCode` session source](https://github.com/openai/codex/blob/e5839cbc591df02408d5009e287887c7d57a9167/codex-rs/cli/src/main.rs#L1365),
+independently of the initialization originator. That source is included by the
+[default interactive filter](https://github.com/openai/codex/blob/e5839cbc591df02408d5009e287887c7d57a9167/codex-rs/app-server/src/filters.rs),
+so this adapter's retained top-level threads are eligible for default local discovery; a desktop client may apply additional filters.
+
+To identify where a thread came from, a persistent one is named
 `DSH · <the call's description>` through `thread/name/set`, which is what a person sees in the list.
 Only new persistent threads are named; resuming never overwrites a title the user
 has edited. Names are normalized to one line and at most 160 Unicode characters.

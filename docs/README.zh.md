@@ -299,8 +299,10 @@ apply: v0.7.0 provider "codex-pro" registered … timeout=5400000ms; presets=["d
 | | |
 |---|---|
 | `ephemeral` | 一次性运行。不会留下任何 Codex CLI 或 Codex 应用能列出的东西。 |
-| `persistent` | 每次委派都得到一条持久 thread：写入 `~/.codex/sessions/`，两边都能列出，也能续接。 |
+| `persistent` | 每次委派都保留一条本地历史，位于 `CODEX_HOME`（通常为 `~/.codex`），供使用同一存储的兼容原生客户端读取。 |
 | `session` | 每个 Agent 会话共用一条持久 thread —— 十次委派只留一条 thread，且第一次之后的每次调用都续接同一段对话。 |
+
+表中的 `session` 自动复用属于独立的 `subagent_codex` 工具。通用 DSH Host Provider 是一次性调用接口：配置为 `persistent` 或 `session` 时，每次都新建具名持久 thread，不自动选择旧会话续接；默认值或显式配置的 `ephemeral` 仍保留临时语义。两个入口都会传递配置的 originator；专用 `subagent_codex_review` 工具始终保持 fresh、ephemeral。
 
 单次调用可以用 `thread_mode` 覆盖这个选择，也可以用 `thread_id` 续接它自己指定的那条 thread。持久模式的结果末尾会带上 thread id：
 
@@ -310,9 +312,13 @@ apply: v0.7.0 provider "codex-pro" registered … timeout=5400000ms; presets=["d
 
 0.165 上续接**不会忽略调用方的选择**：`model`、`cwd`、`permission_mode` 会作为 `thread/resume` 覆盖发送，并与响应里的有效配置比较。`reasoning_effort` 仍是每轮设置，续接时继续有效。对**记住的 session thread**，配置不兼容就换一条新 thread（共用同一期限）；对**显式 `thread_id`**，不兼容会明确报错，而不是悄悄换一条。
 
-**有两件事由 app-server 决定，都是实测出来的。** 还没跑过 turn 的 thread **无法续接** —— 它会回 `no rollout found` —— 所以一条 thread 只有在完成第一次 turn 之后才可续接。另外，**Codex 应用只在 originator 恰好是 `Codex Desktop` 时才会列出该 thread**，那是它客户端过滤用的唯一取值；`originator` 就是设置它的，默认即该字面量。改成别的值就是用**应用内可见性**换一个**诚实的名字**，而 Codex CLI 两种情况都能列出。
+**持久化、列表发现和续接是三件事。** 此前实测的 0.165 app-server 对尚未执行第一次 turn 的新 thread 返回 `no rollout found`；单有 thread ID 或成功命名，不能证明已经存在可续接的对话。原生客户端需要能访问相同的 `CODEX_HOME` 和本地存储环境。历史页面还可能按来源、工作目录／项目、模型 Provider 过滤；按账号发现时也可能隐藏其他登录账号的历史。本地 thread 不会自动变成云端会话，也不会自动出现在其他设备。
 
-因为 originator 无法说明 thread 来自哪里，新建的持久 thread 通过 `thread/name/set` 命名为 `DSH · <本次调用的描述>`。名称规范化为一行、最多 160 个 Unicode 字符；续接时不重新命名，以保留用户修改的标题。桌面直接调用保持尽力命名；下文 machine API 对新持久线程要求在派发任务前确认名称写入。
+`originator` 继续默认使用 `Codex Desktop`，兼容早期接入时实际测试的桌面客户端；它不是所有版本都适用的列表保证。[当前上游本地列表契约](https://github.com/openai/codex/blob/e5839cbc591df02408d5009e287887c7d57a9167/codex-rs/app-server-protocol/src/protocol/v2/thread.rs)默认筛选交互式来源，并拒绝本地请求中的非空 originator 过滤。原委派停止后，可以在对应项目的原生历史／搜索中查找，或者用 `codex resume <thread-id>` 续接已知的持久历史。侧栏没有显示，不等于对话文件已经删除。
+
+在上述固定上游版本中，[`codex app-server` 命令选择 `VSCode` 会话来源](https://github.com/openai/codex/blob/e5839cbc591df02408d5009e287887c7d57a9167/codex-rs/cli/src/main.rs#L1365)，与初始化时的 originator 独立。该来源属于[默认交互式筛选范围](https://github.com/openai/codex/blob/e5839cbc591df02408d5009e287887c7d57a9167/codex-rs/app-server/src/filters.rs)，因此本适配器保留的顶层 thread 符合默认本地发现条件；桌面客户端仍可能应用额外筛选。
+
+为了说明 thread 来自哪里，新建的持久 thread 通过 `thread/name/set` 命名为 `DSH · <本次调用的描述>`。名称规范化为一行、最多 160 个 Unicode 字符；续接时不重新命名，以保留用户修改的标题。桌面直接调用保持尽力命名；下文 machine API 对新持久线程要求在派发任务前确认名称写入。
 
 **一条 thread 同时只能承载一个 turn。** 同一会话同时发出的两条委派会都去争那条被记住的 thread，app-server 会以 `thread-store conflict: … already has an active writer` 拒绝第二条。所以 `session` 模式下的调用会**先检查**：若那条被记住的 thread 正被另一个委派使用，就跳过它，本次调用另起一条，并把这次跳过**写进日志**。并行工作照常进行 —— 只是不再共用一段对话，而这正是 `persistent` 本来的行为，于是该模式**退化为支持这种工作形态的那个模式**。要**顺序执行并让对话延续**就选 `session`；要**同时跑多条委派**就选 `persistent` 或 `ephemeral`。
 

@@ -150,10 +150,44 @@ process.stdout.write(JSON.stringify({ creationOrdering: true, newTurnPending: tr
 `)
   assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'native-snapshot-consumer.mjs')])),
     { creationOrdering: true, newTurnPending: true })
+  // Host entry points use the optional schema peer. Install it only after the
+  // standalone machine checks above have proved that it is not required there.
+  run(npm, ['install', '--prefix', install, '--ignore-scripts', '--no-audit', '--no-fund', '@deepseek-ai/schemastery@3.19.0'])
+  writeFileSync(join(install, 'host-history-consumer.mjs'), `
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { CodexExecProvider } from 'dsh-subagent-codex-pro';
+const base = ${JSON.stringify({ cwd: temp, command, model: request.model })};
+for (const threadMode of [undefined, 'ephemeral', 'persistent', 'session']) {
+  const persistent = threadMode === 'persistent' || threadMode === 'session';
+  const capture = join(base.cwd, 'host-' + (threadMode ?? 'default') + '.jsonl');
+  const provider = new CodexExecProvider({ providerName: 'packed-host', command: base.command,
+    permissionMode: 'workspace-write', model: base.model, runTimeoutMs: 5000,
+    originator: 'Packed Host history', ...(threadMode === undefined ? {} : { threadMode }),
+    env: { FAKE_MACHINE_MODE: 'host-persistence', FAKE_MACHINE_CAPTURE: capture } });
+  for (const label of ['First history', 'Second history']) {
+    const run = await provider.start({ parent: { session: { header: { cwd: base.cwd } } },
+      prompt: [{ type: 'text', text: 'fixture' }], signal: new AbortController().signal, label });
+    try { assert.equal((await run.result).stopReason, 'completed'); } finally { await run.dispose(); }
+  }
+  const messages = readFileSync(capture, 'utf8').trim().split('\\n').map(JSON.parse);
+  assert.deepEqual(messages.filter(m => m.method === 'thread/start').map(m => m.params.ephemeral), [!persistent, !persistent]);
+  assert.equal(messages.some(m => m.method === 'thread/resume'), false);
+  assert.equal(new Set(messages.filter(m => m.method === 'turn/start').map(m => m.params.threadId)).size, 2);
+  assert.deepEqual(messages.filter(m => m.method === 'thread/name/set').map(m => m.params.name),
+    persistent ? ['DSH · First history', 'DSH · Second history'] : []);
+  assert.deepEqual(messages.filter(m => m.method === 'initialize').map(m => m.params.clientInfo.name),
+    ['Packed Host history', 'Packed Host history']);
+}
+process.stdout.write(JSON.stringify({ hostHistory: true, freshPerCall: true, ephemeral: true, configuredOriginator: true }));
+`)
+  assert.deepEqual(JSON.parse(run(process.execPath, [join(install, 'host-history-consumer.mjs')], { env: { ...env, DSH_HOME: temp } })),
+    { hostHistory: true, freshPerCall: true, ephemeral: true, configuredOriginator: true })
   process.stdout.write(JSON.stringify({ ok: true, version: manifest.version,
     actualNpmInstall: true, publicMachineAPI: true, installedCLI: true,
     builtGuardian: true, builtMachineSupervisor: true, providerActivity: true, durableLifecycle: true,
-    readOnlyRecovery: true, requiredNaming: true, childCreationOrdering: true, inferenceRequests: 0 }) + '\n')
+    readOnlyRecovery: true, requiredNaming: true, childCreationOrdering: true, hostProviderHistory: true, inferenceRequests: 0 }) + '\n')
 } finally {
   rmSync(temp, { recursive: true, force: true })
 }

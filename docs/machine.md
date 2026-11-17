@@ -95,6 +95,13 @@ never silently changes to a new thread after failure. Execute and independent re
 orchestrator may explicitly resume each role within its scope. Orchestrators
 own retries, compatibility, durable task state and current-candidate validation.
 
+An orchestrator can retain a fresh conversation without reusing previous input:
+send `threadMode: "persistent"` and omit `threadId` on each call. A new durable
+thread is created each time. This is separate from the standalone API's explicit
+ephemeral option. Local history is available only to clients sharing the same
+`CODEX_HOME` and environment, and native list filters can affect discoverability;
+see [native history and continuation](../README.md#thread-lifetime).
+
 The CLI prints exactly one JSON object on stdout. App-server diagnostics may go
 to stderr. Exit 0 means a completed turn and confirmed cleanup; exit 1 means a
 failed run or a consumer that closed stdout; exit 2 an invalid input envelope.
