@@ -29,7 +29,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     reply(message.id, { config: mode === 'native-mismatch' ? { ...config, 'agents.enabled': !config['agents.enabled'] } : config })
   } else if (message.method === 'thread/start' || message.method === 'thread/resume') {
     const result = {
-      thread: { id: p.threadId ?? 'machine-thread', ephemeral: p.ephemeral === true },
+      thread: { id: p.threadId ?? (mode === 'host-persistence' ? `machine-thread-${process.pid}` : 'machine-thread'), ephemeral: p.ephemeral === true },
       cwd: p.cwd, model: mode === 'wrong-model' ? 'another-model' : p.model ?? 'default-model',
       approvalPolicy: p.approvalPolicy ?? 'never', approvalsReviewer: p.approvalsReviewer ?? 'user',
       sandbox: p.sandbox === 'read-only' ? { type: 'readOnly' }

@@ -477,6 +477,14 @@ the machine entry requires POSIX. See [ownership and cancellation](docs/machine.
 | `persistent` | Every delegation gets durable local history under `CODEX_HOME` (normally `~/.codex`), available to compatible native clients using that same store. |
 | `session` | One durable thread per Agent session, so ten delegations leave one thread and every call after the first continues the same conversation. |
 
+The table's automatic `session` reuse belongs to the independent `subagent_codex`
+tool. The generic DSH Host provider is a one-shot interface: configured
+`persistent` and `session` both create a new named durable thread on every call,
+without selecting an earlier thread to resume. Default or configured `ephemeral`
+still creates throwaway history. Both entry points forward the configured
+originator; the dedicated `subagent_codex_review` tool always stays fresh and
+ephemeral.
+
 A call overrides the choice with `thread_mode`, and continues a thread of its own with `thread_id`. A persistent
 human-text result ends with the thread's id; a schema-constrained result stays pure JSON and reports the id
 separately:

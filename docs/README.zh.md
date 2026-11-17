@@ -302,6 +302,8 @@ apply: v0.7.0 provider "codex-pro" registered … timeout=5400000ms; presets=["d
 | `persistent` | 每次委派都保留一条本地历史，位于 `CODEX_HOME`（通常为 `~/.codex`），供使用同一存储的兼容原生客户端读取。 |
 | `session` | 每个 Agent 会话共用一条持久 thread —— 十次委派只留一条 thread，且第一次之后的每次调用都续接同一段对话。 |
 
+表中的 `session` 自动复用属于独立的 `subagent_codex` 工具。通用 DSH Host Provider 是一次性调用接口：配置为 `persistent` 或 `session` 时，每次都新建具名持久 thread，不自动选择旧会话续接；默认值或显式配置的 `ephemeral` 仍保留临时语义。两个入口都会传递配置的 originator；专用 `subagent_codex_review` 工具始终保持 fresh、ephemeral。
+
 单次调用可以用 `thread_mode` 覆盖这个选择，也可以用 `thread_id` 续接它自己指定的那条 thread。持久模式的结果末尾会带上 thread id：
 
 ```

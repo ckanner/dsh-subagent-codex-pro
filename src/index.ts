@@ -120,7 +120,9 @@ export interface Config {
    *   after the first delegation each call continues the same conversation —
    *   which keeps the prompt prefix stable and lets the model's cache do its
    *   work. A call may still override either choice, and pass `thread_id` to
-   *   continue a thread of its own.
+   *   continue a thread of its own. This reuse policy belongs to the independent
+   *   tool; the one-shot Host provider creates a fresh durable thread for either
+   *   `persistent` or `session` and never infers a previous thread to resume.
    */
   threadMode?: 'ephemeral' | 'persistent' | 'session'
   /**
@@ -135,11 +137,10 @@ export interface Config {
   /**
    * What the app-server records as the thread's originator.
    *
-   * This is what decides whether the Codex desktop application lists a thread:
-   * that client filters its list to the single value `Codex Desktop`, so the
-   * default here is that literal. Overriding it trades desktop visibility for an
-   * honest name — a thread the application will not show is still listed by the
-   * Codex CLI and still resumable.
+   * Defaults to `Codex Desktop` for compatibility with desktop clients tested
+   * when the integration was introduced. Native discovery also depends on the
+   * shared local store and the client's history filters; this value alone does
+   * not guarantee a sidebar entry.
    */
   originator?: string
 }
@@ -450,7 +451,11 @@ export class CodexExecProvider implements SubagentProviderLike {
     const native = readNativeDefault(this.resolved.native)
     const spec: CodexRunSpec = {
       ...hostActivity(this.activityHost, request.parent, request.signal),
+      // Host calls have no resume contract; retain each configured durable run
+      // independently, including when the tool's configuration says `session`.
+      threadMode: this.resolved.threadMode === 'persistent' || this.resolved.threadMode === 'session' ? 'persistent' : 'ephemeral',
       threadName: threadNameFor(request.label ?? 'Codex delegation'),
+      originator: this.resolved.originator,
       ...(native === undefined ? {} : { native }),
       cwd,
       command: this.resolved.command,

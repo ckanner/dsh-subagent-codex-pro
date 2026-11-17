@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.10.2 (source candidate)
 
+- Honor configured `persistent` and `session` history in the generic DSH Host provider. Each one-shot provider call starts its own named durable thread; it never implicitly resumes an earlier call. Preserve default/configured ephemeral runs, explicit tool overrides and the dedicated ephemeral review path.
+- Forward the configured originator through the Host provider initialization, matching the independent tool. Cover both settings through real supervisor/guardian protocol fixtures and the installed public package.
 - Clarify that native persistence, client discovery and continuation are separate. Document fresh durable machine calls, shared local storage requirements and native history filters without promising automatic cross-device visibility or a universal desktop originator filter.
 
 ## 0.10.1 (source candidate)
